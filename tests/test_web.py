@@ -171,6 +171,18 @@ class WebTests(unittest.TestCase):
         self.assertEqual(rejected["status"], "400 Bad Request")
         self.assertEqual(accepted["status"], "201 Created")
 
+    def test_export_actions_are_visible_on_session_and_group_pages(self):
+        group_id = self.app.database.add_group("Export Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+
+        group_page = self.call("GET", f"/groups/{group_id}")
+        session_page = self.call("GET", f"/sessions/{session_id}")
+        self.assertIn(b"Export Group CSV", group_page["body"])
+        self.assertIn(f"/groups/{group_id}/export.csv".encode(), group_page["body"])
+        self.assertIn(b"Export Session CSV", session_page["body"])
+        self.assertIn(f"/sessions/{session_id}/export.csv".encode(), session_page["body"])
+
     def test_feedback_button_and_form_are_visible(self):
         home = self.call("GET", "/")
         form = self.call("GET", "/feedback/new")

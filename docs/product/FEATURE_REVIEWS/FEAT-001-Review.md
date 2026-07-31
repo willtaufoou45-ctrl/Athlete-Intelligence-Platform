@@ -42,6 +42,12 @@ A coach needs immediate context to interpret today's performance. Showing only
 current-session attempts makes it difficult to compare today's times with the
 athlete's previous best or recent sessions.
 
+### Data Portability
+
+Sprint results currently remain inside AIP. Coaches may still need the same
+data in Google Sheets, Excel, reports, or other workflows. Re-entering results
+manually would duplicate work and create errors.
+
 ## Unexpected behavior
 
 ## What coaches liked
@@ -95,6 +101,12 @@ distance, and unit.
 
 Comparable results must match the athlete, exact distance, and exact unit.
 Historical attempts must not be added to the current-session attempt list.
+
+### Required Improvements
+
+Allow coaches to export persisted sprint results from the current session or a
+selected Training Group as CSV. AIP should remain the source of truth so the
+same sprint data does not need to be recorded manually in another system.
 
 ## New feature ideas created
 

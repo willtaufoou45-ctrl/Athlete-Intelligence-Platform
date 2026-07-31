@@ -9,6 +9,7 @@ from urllib.parse import parse_qs
 
 from .database import Database
 from .domain import classify_attempts, format_seconds, normalize_distance, seconds_to_milliseconds
+from .export import export_filename, parse_export_dates, sprint_export_csv
 
 
 def create_app(database_path: str | Path = "data/aip.sqlite3"):
@@ -26,6 +27,19 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 return respond(start_response, feedback_form_page(database))
             if method == "GET" and path == "/feedback":
                 return respond(start_response, feedback_list_page(database))
+            if method == "GET" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "export.csv":
+                session_id = resource_id(parts[1], "session")
+                payload = sprint_export_csv(database, session_id=session_id)
+                return csv_response(start_response, payload, export_filename("session", session_id))
+            if method == "GET" and len(parts) == 3 and parts[0] == "groups" and parts[2] == "export.csv":
+                group_id = resource_id(parts[1], "Training Group")
+                group = database.group(group_id)
+                if not group:
+                    raise LookupError("Training Group not found.")
+                query = parse_qs(environ.get("QUERY_STRING", ""))
+                start, end = parse_export_dates(first_value(query, "start"), first_value(query, "end"))
+                payload = sprint_export_csv(database, group_id=group_id, start=start, end=end)
+                return csv_response(start_response, payload, export_filename("group", group_id, group["name"]))
             if method == "POST" and path == "/feedback":
                 data = form_data(environ)
                 database.add_feedback(
@@ -133,7 +147,7 @@ def group_page(db: Database, group_id: int) -> str:
     <main class='home-grid'>
       <section class='card'><h2>Persistent roster</h2><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
       <section class='card'><h2>Start a session</h2><form method='post' action='/groups/{group_id}/sessions' class='session-form'><label>Distance<input name='distance' inputmode='decimal' required value='10'></label><label>Unit<select name='unit'><option value='yards'>yards</option><option value='meters'>meters</option></select></label><button {disabled}>Start with this roster</button></form>{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
-      <section class='card sessions'><h2>Session history</h2>{sessions}</section>
+      <section class='card sessions'><h2>Session history</h2>{sessions}<h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
     </main>"""
     return page(group["name"], body)
 
@@ -153,7 +167,7 @@ def session_page(db: Database, session_id: int) -> str:
     group_label = f"<p class='group-label'>{html.escape(group['name'])}</p>" if group else ""
     back_link = f"/groups/{group['id']}" if group else "/"
     body = f"""
-    <header class='capture-header'><a href='{back_link}'>← Sessions</a><p class='eyebrow'>Sprint capture session</p><h1>{html.escape(session['distance'])} {session['unit']}</h1>{group_label}<p>Move through the training order or jump to any athlete.</p></header>
+    <header class='capture-header'><a href='{back_link}'>← Sessions</a><p class='eyebrow'>Sprint capture session</p><h1>{html.escape(session['distance'])} {session['unit']}</h1>{group_label}<p>Move through the training order or jump to any athlete.</p><a class='button-link' href='/sessions/{session_id}/export.csv'>Export Session CSV</a></header>
     <main class='capture-layout'>
       <section class='capture-card'>
         {empty}<form id='capture-form' data-session='{session_id}'>
@@ -270,6 +284,11 @@ def optional_resource_id(value, resource: str) -> int | None:
     return None if value is None or str(value).strip() == "" else resource_id(value, resource)
 
 
+def first_value(query: dict[str, list[str]], key: str) -> str | None:
+    values = query.get(key)
+    return values[0] if values else None
+
+
 def respond(start_response, content: str, status: str = "200 OK"):
     payload = content.encode()
     start_response(status, [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(payload)))])
@@ -279,6 +298,18 @@ def respond(start_response, content: str, status: str = "200 OK"):
 def json_response(start_response, value: dict, status: str = "200 OK"):
     payload = json.dumps(value).encode()
     start_response(status, [("Content-Type", "application/json"), ("Content-Length", str(len(payload)))])
+    return [payload]
+
+
+def csv_response(start_response, payload: bytes, filename: str):
+    start_response(
+        "200 OK",
+        [
+            ("Content-Type", "text/csv; charset=utf-8"),
+            ("Content-Disposition", f'attachment; filename="{filename}"'),
+            ("Content-Length", str(len(payload))),
+        ],
+    )
     return [payload]
 
 
@@ -315,4 +346,5 @@ STYLES = """
 :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#17211b;background:#f3f5ef;line-height:1.5}*{box-sizing:border-box}body{margin:0;padding:32px;max-width:1100px;margin-inline:auto}header{margin:20px 0 32px}h1,h2,p{margin-top:0}h1{font-size:clamp(2rem,6vw,4.4rem);line-height:1;letter-spacing:-.05em;max-width:780px}h2{letter-spacing:-.025em}.eyebrow{text-transform:uppercase;letter-spacing:.13em;font-weight:800;font-size:.75rem;color:#647267}.home-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card,.capture-card,.results-card{background:#fff;border:1px solid #dce2d8;border-radius:18px;padding:24px;box-shadow:0 10px 30px #17211b0a}.sessions{grid-column:1/-1}label{display:grid;gap:7px;font-weight:700}input,select,button{font:inherit;border-radius:10px;border:1px solid #b9c3b8;padding:12px}input:focus,select:focus,button:focus{outline:3px solid #ffc857;outline-offset:2px}button{background:#173c2c;color:#fff;border-color:#173c2c;font-weight:800;cursor:pointer}button:disabled{opacity:.5}.inline-form,.session-form,.time-row{display:flex;align-items:end;gap:10px}.inline-form label,.session-form label{flex:1}ul{padding-left:20px}.session-link{display:flex;justify-content:space-between;color:inherit;text-decoration:none;border-top:1px solid #e6eae3;padding:14px 0}.session-link span,.muted,.shortcut{color:#6d776e}.capture-header h1{margin-bottom:8px}.capture-layout{display:grid;grid-template-columns:minmax(300px,.8fr) minmax(360px,1.2fr);gap:18px}.capture-card form{display:grid;gap:22px}.time-row input{font-size:2rem;width:100%;font-variant-numeric:tabular-nums}.time-row button{min-width:100px}.shortcut{font-size:.85rem;margin-top:30px}kbd{border:1px solid #c7cec5;border-bottom-width:2px;border-radius:5px;background:#f5f6f3;padding:2px 6px}.result-heading,.attempt{display:flex;justify-content:space-between;align-items:center;gap:12px}.best{text-align:right}.best span{display:block;color:#6d776e;font-size:.8rem}.best strong{font-size:1.8rem}.attempts{list-style:none;padding:0;margin:22px 0 0}.attempt{border-top:1px solid #e6eae3;padding:14px 0}.attempt strong{font-size:1.25rem;font-variant-numeric:tabular-nums}.badge{font-size:.7rem;text-transform:uppercase;font-weight:900;letter-spacing:.08em;padding:4px 7px;border-radius:999px;margin-left:6px}.baseline{background:#e7e9f8;color:#333b7a}.pr{background:#d7f4df;color:#155d2d}.actions{display:flex;gap:7px}.actions button{padding:7px 10px;background:#fff;color:#173c2c}.actions .danger{color:#8c2c24;border-color:#d7aaa6}.saved{animation:flash 1.2s}@keyframes flash{from{background:#d7f4df}to{background:transparent}}#feedback{min-height:24px;color:#155d2d;font-weight:800;margin:12px 0 0}.notice{background:#fff3cf;padding:12px;border-radius:10px}@media(max-width:720px){body{padding:18px}.home-grid,.capture-layout{grid-template-columns:1fr}.sessions{grid-column:auto}.inline-form,.session-form{align-items:stretch;flex-direction:column}.session-link{align-items:flex-start;flex-direction:column}}
 .groups,.legacy{grid-column:1/-1}.legacy summary{font-weight:800;cursor:pointer}.roster{list-style:none;padding:0}.roster li{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #e6eae3}.position{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:#e8eee7;font-weight:800}.group-label{font-weight:800;color:#47725d}.capture-card form{gap:18px}.athlete-flow{display:grid;grid-template-columns:52px 1fr 52px;gap:10px;align-items:stretch}.flow-button{font-size:1.5rem;padding:8px}.active-athlete{display:flex;min-height:82px;flex-direction:column;align-items:center;justify-content:center;border:1px solid #b9c3b8;border-radius:12px;background:#f7f8f5}.active-athlete span{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#6d776e}.active-athlete strong{font-size:1.35rem;text-align:center}.jump-label{font-size:.85rem}@media(max-width:720px){.groups,.legacy{grid-column:auto}}
 .prototype-nav{display:flex;justify-content:flex-end}.button-link{display:inline-block;background:#173c2c;color:#fff;text-decoration:none;border-radius:10px;padding:10px 14px;font-weight:800}.feedback-layout{max-width:760px}.feedback-form{display:grid;gap:20px}.feedback-form textarea{font:inherit;resize:vertical;border-radius:10px;border:1px solid #b9c3b8;padding:12px}.feedback-form textarea:focus{outline:3px solid #ffc857;outline-offset:2px}.feedback-context{display:grid;grid-template-columns:1fr 1fr;gap:12px}.feedback-list{display:grid;gap:14px}.feedback-entry h3{margin-bottom:4px;font-size:1rem}.feedback-entry p{white-space:pre-wrap}@media(max-width:720px){.feedback-context{grid-template-columns:1fr}}
+.export-form{display:flex;align-items:end;gap:10px;margin-top:14px}.export-form label{flex:1}@media(max-width:720px){.export-form{align-items:stretch;flex-direction:column}}
 """

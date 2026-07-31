@@ -343,6 +343,51 @@ class Database:
                        ORDER BY a.captured_at, a.id"""
             return [dict(row) for row in connection.execute(query)]
 
+    def export_attempts(
+        self,
+        *,
+        session_id: int | None = None,
+        group_id: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> list[dict]:
+        if (session_id is None) == (group_id is None):
+            raise ValueError("Choose exactly one export scope.")
+        with self.connect() as connection:
+            if session_id is not None and not connection.execute(
+                "SELECT 1 FROM sprint_capture_sessions WHERE id=?", (session_id,)
+            ).fetchone():
+                raise LookupError("Session not found.")
+            if group_id is not None and not connection.execute(
+                "SELECT 1 FROM training_groups WHERE id=?", (group_id,)
+            ).fetchone():
+                raise LookupError("Training Group not found.")
+            conditions = ["a.session_id=?" if session_id is not None else "gs.group_id=?"]
+            parameters: list[object] = [session_id if session_id is not None else group_id]
+            if start:
+                conditions.append("date(s.created_at) >= ?")
+                parameters.append(start)
+            if end:
+                conditions.append("date(s.created_at) <= ?")
+                parameters.append(end)
+            query = f"""SELECT a.*, athletes.name AS athlete_name,
+                               s.distance, s.unit, s.created_at AS session_created_at,
+                               gs.group_id, groups.name AS group_name,
+                               roster.position AS roster_position
+                        FROM sprint_attempts a
+                        JOIN sprint_capture_sessions s ON s.id=a.session_id
+                        JOIN athletes ON athletes.id=a.athlete_id
+                        LEFT JOIN training_group_sessions gs ON gs.session_id=s.id
+                        LEFT JOIN training_groups groups ON groups.id=gs.group_id
+                        LEFT JOIN session_roster_members roster
+                          ON roster.session_id=s.id AND roster.athlete_id=a.athlete_id
+                        WHERE {' AND '.join(conditions)}
+                        ORDER BY s.created_at, s.id,
+                                 CASE WHEN roster.position IS NULL THEN 1 ELSE 0 END,
+                                 roster.position, athletes.name COLLATE NOCASE,
+                                 a.athlete_id, a.captured_at, a.id"""
+            return [dict(row) for row in connection.execute(query, parameters)]
+
 
 def normalized_name(value: str, label: str) -> str:
     name = " ".join(value.split())

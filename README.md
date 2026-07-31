@@ -33,6 +33,10 @@ roster reuse with an immutable roster snapshot for each new group session, and
 previous/next athlete navigation with a searchable out-of-order fallback. These
 improvements are implemented locally and awaiting field validation.
 
+FEAT-001.2 adds CSV downloads for an individual sprint session or a Training
+Group, with optional session-date filtering for group exports. Exported files
+use the existing persisted sprint records and derived baseline/PR semantics.
+
 The prototype also includes a local feedback form for recording workflow
 friction, successful interactions, and desired features. Feedback is stored in
 the same local SQLite database as athletes, Training Groups, sessions, and

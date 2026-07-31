@@ -24,6 +24,7 @@ documented** are intentional gaps, not missing links.
 
 - [FEAT-001 — Manual Sprint Capture](product/FEATURES/feat-001-Manual%20Sprint%20Capture.md) — Approved for local prototype
   - [FEAT-001.1 — Workflow Friction Improvements](product/FEATURES/feat-001.1-Workflow-Friction-Improvements.md) — Implemented locally; awaiting field validation
+  - [FEAT-001.2 — Sprint Data Export](product/FEATURES/feat-001.2-Sprint-Data-Export.md) — Implemented locally; awaiting field validation
   - [Field review](product/FEATURE_REVIEWS/FEAT-001-Review.md) — Field observations recorded
 - [FEAT-002 — Training Groups & Persistent Rosters](product/FEATURE_BACKLOG.md#feat-002--training-groups--persistent-rosters) — Discovery
 - [FEAT-003 — Roster Import & Group Management](product/FEATURE_BACKLOG.md#feat-003--roster-import--group-management) — Discovery

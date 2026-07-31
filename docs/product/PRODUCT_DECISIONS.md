@@ -173,3 +173,29 @@ Validated workflow gap; not yet implemented.
 - FEAT-001 field review
 - PD-001 — Organize live capture around athlete flow
 - [WI-005 — Data Capture](../workflow_intelligence/WI-005-Data-Capture.md)
+
+## PD-005 — AIP Is the Sprint Data Source of Truth
+
+### Decision
+
+Sprint times should be recorded once in AIP and exported when needed. Coaches
+should not manually duplicate data in another system.
+
+### Reasoning
+
+Duplicate entry wastes time, increases error risk, creates conflicting records,
+and weakens trust in the data.
+
+### Product Implication
+
+Provide a simple CSV export before adding direct integrations.
+
+### Status
+
+Validated workflow improvement.
+
+### Related
+
+- [FEAT-001 — Manual Sprint Capture](FEATURES/feat-001-Manual%20Sprint%20Capture.md)
+- [FEAT-001.1 — Workflow Friction Improvements](FEATURES/feat-001.1-Workflow-Friction-Improvements.md)
+- [FEAT-001.2 — Sprint Data Export](FEATURES/feat-001.2-Sprint-Data-Export.md)
