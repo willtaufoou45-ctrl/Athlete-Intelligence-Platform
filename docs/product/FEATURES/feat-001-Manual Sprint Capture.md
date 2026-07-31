@@ -125,6 +125,7 @@ model.
 
 ## Evidence and related documents
 
+- [FEAT-001 field review](../FEATURE_REVIEWS/FEAT-001-Review.md)
 - `docs/product/COACH_JOURNEY.md`, Sprint Testing section.
 - `docs/product/PRACTICE_OS.md`, Sprint Testing section.
 - `docs/research/FIELD_NOTES/2026-06-30.md`, Sprint Testing observations.

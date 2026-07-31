@@ -3,9 +3,13 @@
 Athlete Intelligence Platform (AIP) is an early-stage coaching product focused
 on turning objective athlete measurements into clear coaching decisions.
 
-The repository currently contains product discovery and design documentation
-alongside an exploratory Python prototype. The first planned vertical slice is
+The repository contains product discovery and design documentation alongside
+FEAT-001, a functional local prototype for manual sprint capture. Its canonical
+specification is
 [FEAT-001 — Manual Sprint Capture](docs/product/FEATURES/feat-001-Manual%20Sprint%20Capture.md).
+
+See the [Documentation Index](docs/INDEX.md) for the canonical repository map
+and current documentation gaps.
 
 ## Repository structure
 
@@ -15,9 +19,55 @@ alongside an exploratory Python prototype. The first planned vertical slice is
 - `docs/research/` — field notes and product research.
 - `docs/workflows/` — workflow placeholders as they are developed.
 - `docs/case_studies/` — athlete case-study material.
-- `main.py` — exploratory prototype code; not yet the FEAT-001 application.
+- `aip/` — FEAT-001 application, measurement logic, and SQLite persistence.
+- `tests/` — automated tests for measurement, persistence, and web behavior.
+- `main.py` — local FEAT-001 application launcher.
 
 ## Current status
 
-FEAT-001 is specified but not implemented. See its canonical specification for
-scope, measurement rules, acceptance criteria, and explicit exclusions.
+FEAT-001 is implemented as a single-coach local prototype. It is intended for
+workflow validation, not production deployment.
+
+## Run the application
+
+From the repository root:
+
+```bash
+python3 main.py
+```
+
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000) in a browser. Stop the
+application by pressing `Control-C` in the terminal.
+
+## Run the tests
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v
+```
+
+## Local data and backups
+
+When the application is started from the repository root, SQLite data is stored
+at:
+
+```text
+data/aip.sqlite3
+```
+
+The entire `data/` directory is excluded from Git. Local athlete, session, and
+attempt records are therefore not included in commits or pushed to GitHub.
+
+To create a manual backup, stop the application and copy the database file to a
+safe location. For example:
+
+```bash
+cp data/aip.sqlite3 aip-backup.sqlite3
+```
+
+To reset all local prototype data, stop the application and delete
+`data/aip.sqlite3`. A new empty database will be created the next time the
+application starts.
+
+**Warning:** Deleting `data/aip.sqlite3` permanently removes all local athlete,
+session, and sprint-attempt records unless you previously copied the file to a
+backup location.
