@@ -114,6 +114,43 @@ class DatabaseTests(unittest.TestCase):
         reopened_again.initialize()
         self.assertEqual([a["id"] for a in reopened_again.session_athletes(session_id)], [first_id, second_id])
 
+    def test_feedback_persists_with_optional_group_and_session_context(self):
+        group_id = self.db.add_group("Feedback Group")
+        session_id = self.db.add_group_session(group_id, "20", "meters")
+        self.db.add_feedback("Athlete switching", "Fast save", "Queue", group_id, session_id)
+
+        reopened = Database(self.path)
+        feedback = reopened.all_feedback()[0]
+        self.assertTrue(feedback["created_at"])
+        self.assertEqual(feedback["group_name"], "Feedback Group")
+        self.assertEqual(feedback["session_id"], session_id)
+        self.assertEqual(feedback["slowed_down"], "Athlete switching")
+
+    def test_feedback_supports_group_only_and_session_only_context(self):
+        group_id = self.db.add_group("Optional Context Group")
+        group_feedback_id = self.db.add_feedback("Group only", "", "", group_id=group_id)
+        session_feedback_id = self.db.add_feedback("Session only", "", "", session_id=self.session_id)
+
+        feedback = {entry["id"]: entry for entry in self.db.all_feedback()}
+        self.assertEqual(feedback[group_feedback_id]["group_id"], group_id)
+        self.assertIsNone(feedback[group_feedback_id]["session_id"])
+        self.assertIsNone(feedback[session_feedback_id]["group_id"])
+        self.assertEqual(feedback[session_feedback_id]["session_id"], self.session_id)
+
+    def test_feedback_requires_a_response_and_valid_context(self):
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            self.db.add_feedback("", "  ", "")
+        with self.assertRaisesRegex(LookupError, "Training Group"):
+            self.db.add_feedback("Slow", "", "", group_id=99999)
+
+    def test_feedback_rejects_session_from_another_group(self):
+        selected_group = self.db.add_group("Selected Group")
+        other_group = self.db.add_group("Other Group")
+        other_session = self.db.add_group_session(other_group, "10", "yards")
+
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            self.db.add_feedback("Wrong context", "", "", selected_group, other_session)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,11 @@ roster reuse with an immutable roster snapshot for each new group session, and
 previous/next athlete navigation with a searchable out-of-order fallback. These
 improvements are implemented locally and awaiting field validation.
 
+The prototype also includes a local feedback form for recording workflow
+friction, successful interactions, and desired features. Feedback is stored in
+the same local SQLite database as athletes, Training Groups, sessions, and
+sprint attempts, and can be reviewed chronologically from the app.
+
 ## Run the application
 
 From the repository root:
@@ -63,7 +68,8 @@ The entire `data/` directory is excluded from Git. Local athlete, session, and
 attempt records are therefore not included in commits or pushed to GitHub.
 
 To create a manual backup, stop the application and copy the database file to a
-safe location. For example:
+safe location. This copy includes feedback records along with all other local
+prototype data. For example:
 
 ```bash
 cp data/aip.sqlite3 aip-backup.sqlite3
@@ -73,6 +79,6 @@ To reset all local prototype data, stop the application and delete
 `data/aip.sqlite3`. A new empty database will be created the next time the
 application starts.
 
-**Warning:** Deleting `data/aip.sqlite3` permanently removes all local athlete,
-session, and sprint-attempt records unless you previously copied the file to a
-backup location.
+**Warning:** Deleting `data/aip.sqlite3` permanently removes feedback records,
+athletes, Training Groups, sessions, sprint attempts, and all other local
+prototype data unless you previously copied the file to a backup location.

@@ -22,6 +22,20 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
         try:
             if method == "GET" and path == "/":
                 return respond(start_response, home_page(database))
+            if method == "GET" and path == "/feedback/new":
+                return respond(start_response, feedback_form_page(database))
+            if method == "GET" and path == "/feedback":
+                return respond(start_response, feedback_list_page(database))
+            if method == "POST" and path == "/feedback":
+                data = form_data(environ)
+                database.add_feedback(
+                    data.get("slowed_down", ""),
+                    data.get("worked_well", ""),
+                    data.get("wished_for", ""),
+                    optional_resource_id(data.get("group_id"), "Training Group"),
+                    optional_resource_id(data.get("session_id"), "session"),
+                )
+                return redirect(start_response, "/feedback")
             if method == "POST" and path == "/athletes":
                 data = form_data(environ)
                 database.add_athlete(data.get("name", ""))
@@ -179,8 +193,56 @@ def athlete_summary(db: Database, session_id: int, athlete_id: int, saved_attemp
     }
 
 
+def feedback_form_page(db: Database) -> str:
+    group_options = "".join(
+        f"<option value='{group['id']}'>{html.escape(group['name'])}</option>" for group in db.all_groups()
+    )
+    session_options = "".join(
+        f"<option value='{session['id']}'>Session {session['id']} · {html.escape(session['distance'])} {session['unit']} · {session['created_at']}</option>"
+        for session in db.all_sessions()
+    )
+    body = f"""
+    <header><a href='/'>← Sprint capture</a><p class='eyebrow'>Local prototype feedback</p><h1>Send feedback</h1><p>Capture what happened while it is still fresh. Responses stay in this local prototype.</p></header>
+    <main class='feedback-layout'><form method='post' action='/feedback' class='card feedback-form'>
+      <label>What slowed you down?<textarea name='slowed_down' maxlength='5000' rows='4'></textarea></label>
+      <label>What worked well?<textarea name='worked_well' maxlength='5000' rows='4'></textarea></label>
+      <label>What feature did you wish existed?<textarea name='wished_for' maxlength='5000' rows='4'></textarea></label>
+      <div class='feedback-context'><label>Training Group (optional)<select name='group_id'><option value=''>None</option>{group_options}</select></label><label>Session (optional)<select name='session_id'><option value=''>None</option>{session_options}</select></label></div>
+      <button>Save feedback</button><p class='muted'>At least one response is required.</p>
+    </form><p><a href='/feedback'>View saved feedback</a></p></main>"""
+    return page("Send feedback", body)
+
+
+def feedback_list_page(db: Database) -> str:
+    items = []
+    for entry in db.all_feedback():
+        context = []
+        if entry["group_name"]:
+            context.append(html.escape(entry["group_name"]))
+        if entry["session_id"]:
+            context.append(
+                f"Session {entry['session_id']} · {html.escape(entry['session_distance'])} {entry['session_unit']}"
+            )
+        answers = "".join(
+            f"<div><h3>{label}</h3><p>{html.escape(entry[field])}</p></div>"
+            for field, label in (
+                ("slowed_down", "What slowed you down?"),
+                ("worked_well", "What worked well?"),
+                ("wished_for", "What feature did you wish existed?"),
+            )
+            if entry[field]
+        )
+        context_text = " · ".join(context) if context else "No group or session attached"
+        items.append(
+            f"<article class='card feedback-entry'><p class='eyebrow'>{entry['created_at']} · {context_text}</p>{answers}</article>"
+        )
+    entries = "".join(items) or "<section class='card'><p class='muted'>No feedback has been saved yet.</p></section>"
+    body = f"""<header><a href='/'>← Sprint capture</a><p class='eyebrow'>Local prototype feedback</p><h1>Feedback</h1><p>Newest feedback appears first.</p><a class='button-link' href='/feedback/new'>Send feedback</a></header><main class='feedback-list'>{entries}</main>"""
+    return page("Feedback", body)
+
+
 def page(title: str, body: str) -> str:
-    return f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{html.escape(title)} · AIP</title><style>{STYLES}</style></head><body>{body}</body></html>"
+    return f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{html.escape(title)} · AIP</title><style>{STYLES}</style></head><body><nav class='prototype-nav'><a class='button-link' href='/feedback/new'>Send Feedback</a></nav>{body}</body></html>"
 
 
 def form_data(environ) -> dict[str, str]:
@@ -202,6 +264,10 @@ def resource_id(value, resource: str) -> int:
     if identifier <= 0:
         raise ValueError(f"Invalid {resource} identifier.")
     return identifier
+
+
+def optional_resource_id(value, resource: str) -> int | None:
+    return None if value is None or str(value).strip() == "" else resource_id(value, resource)
 
 
 def respond(start_response, content: str, status: str = "200 OK"):
@@ -248,4 +314,5 @@ const retained=Number(localStorage.getItem(`aip-session-${sessionId}-athlete`));
 STYLES = """
 :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#17211b;background:#f3f5ef;line-height:1.5}*{box-sizing:border-box}body{margin:0;padding:32px;max-width:1100px;margin-inline:auto}header{margin:20px 0 32px}h1,h2,p{margin-top:0}h1{font-size:clamp(2rem,6vw,4.4rem);line-height:1;letter-spacing:-.05em;max-width:780px}h2{letter-spacing:-.025em}.eyebrow{text-transform:uppercase;letter-spacing:.13em;font-weight:800;font-size:.75rem;color:#647267}.home-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card,.capture-card,.results-card{background:#fff;border:1px solid #dce2d8;border-radius:18px;padding:24px;box-shadow:0 10px 30px #17211b0a}.sessions{grid-column:1/-1}label{display:grid;gap:7px;font-weight:700}input,select,button{font:inherit;border-radius:10px;border:1px solid #b9c3b8;padding:12px}input:focus,select:focus,button:focus{outline:3px solid #ffc857;outline-offset:2px}button{background:#173c2c;color:#fff;border-color:#173c2c;font-weight:800;cursor:pointer}button:disabled{opacity:.5}.inline-form,.session-form,.time-row{display:flex;align-items:end;gap:10px}.inline-form label,.session-form label{flex:1}ul{padding-left:20px}.session-link{display:flex;justify-content:space-between;color:inherit;text-decoration:none;border-top:1px solid #e6eae3;padding:14px 0}.session-link span,.muted,.shortcut{color:#6d776e}.capture-header h1{margin-bottom:8px}.capture-layout{display:grid;grid-template-columns:minmax(300px,.8fr) minmax(360px,1.2fr);gap:18px}.capture-card form{display:grid;gap:22px}.time-row input{font-size:2rem;width:100%;font-variant-numeric:tabular-nums}.time-row button{min-width:100px}.shortcut{font-size:.85rem;margin-top:30px}kbd{border:1px solid #c7cec5;border-bottom-width:2px;border-radius:5px;background:#f5f6f3;padding:2px 6px}.result-heading,.attempt{display:flex;justify-content:space-between;align-items:center;gap:12px}.best{text-align:right}.best span{display:block;color:#6d776e;font-size:.8rem}.best strong{font-size:1.8rem}.attempts{list-style:none;padding:0;margin:22px 0 0}.attempt{border-top:1px solid #e6eae3;padding:14px 0}.attempt strong{font-size:1.25rem;font-variant-numeric:tabular-nums}.badge{font-size:.7rem;text-transform:uppercase;font-weight:900;letter-spacing:.08em;padding:4px 7px;border-radius:999px;margin-left:6px}.baseline{background:#e7e9f8;color:#333b7a}.pr{background:#d7f4df;color:#155d2d}.actions{display:flex;gap:7px}.actions button{padding:7px 10px;background:#fff;color:#173c2c}.actions .danger{color:#8c2c24;border-color:#d7aaa6}.saved{animation:flash 1.2s}@keyframes flash{from{background:#d7f4df}to{background:transparent}}#feedback{min-height:24px;color:#155d2d;font-weight:800;margin:12px 0 0}.notice{background:#fff3cf;padding:12px;border-radius:10px}@media(max-width:720px){body{padding:18px}.home-grid,.capture-layout{grid-template-columns:1fr}.sessions{grid-column:auto}.inline-form,.session-form{align-items:stretch;flex-direction:column}.session-link{align-items:flex-start;flex-direction:column}}
 .groups,.legacy{grid-column:1/-1}.legacy summary{font-weight:800;cursor:pointer}.roster{list-style:none;padding:0}.roster li{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #e6eae3}.position{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:#e8eee7;font-weight:800}.group-label{font-weight:800;color:#47725d}.capture-card form{gap:18px}.athlete-flow{display:grid;grid-template-columns:52px 1fr 52px;gap:10px;align-items:stretch}.flow-button{font-size:1.5rem;padding:8px}.active-athlete{display:flex;min-height:82px;flex-direction:column;align-items:center;justify-content:center;border:1px solid #b9c3b8;border-radius:12px;background:#f7f8f5}.active-athlete span{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#6d776e}.active-athlete strong{font-size:1.35rem;text-align:center}.jump-label{font-size:.85rem}@media(max-width:720px){.groups,.legacy{grid-column:auto}}
+.prototype-nav{display:flex;justify-content:flex-end}.button-link{display:inline-block;background:#173c2c;color:#fff;text-decoration:none;border-radius:10px;padding:10px 14px;font-weight:800}.feedback-layout{max-width:760px}.feedback-form{display:grid;gap:20px}.feedback-form textarea{font:inherit;resize:vertical;border-radius:10px;border:1px solid #b9c3b8;padding:12px}.feedback-form textarea:focus{outline:3px solid #ffc857;outline-offset:2px}.feedback-context{display:grid;grid-template-columns:1fr 1fr;gap:12px}.feedback-list{display:grid;gap:14px}.feedback-entry h3{margin-bottom:4px;font-size:1rem}.feedback-entry p{white-space:pre-wrap}@media(max-width:720px){.feedback-context{grid-template-columns:1fr}}
 """

@@ -171,6 +171,89 @@ class WebTests(unittest.TestCase):
         self.assertEqual(rejected["status"], "400 Bad Request")
         self.assertEqual(accepted["status"], "201 Created")
 
+    def test_feedback_button_and_form_are_visible(self):
+        home = self.call("GET", "/")
+        form = self.call("GET", "/feedback/new")
+        self.assertIn(b"Send Feedback", home["body"])
+        self.assertIn(b"What slowed you down?", form["body"])
+        self.assertIn(b"What worked well?", form["body"])
+        self.assertIn(b"What feature did you wish existed?", form["body"])
+
+    def test_feedback_submission_without_context_is_listed(self):
+        saved = self.call(
+            "POST",
+            "/feedback",
+            {"slowed_down": "No context feedback", "worked_well": "", "wished_for": ""},
+            form=True,
+        )
+        self.assertEqual(saved["status"], "303 See Other")
+        self.assertEqual(saved["header_map"]["Location"], "/feedback")
+        feedback = self.app.database.all_feedback()[0]
+        self.assertIsNone(feedback["group_id"])
+        self.assertIsNone(feedback["session_id"])
+        self.assertTrue(feedback["created_at"])
+        self.assertIn(b"No context feedback", self.call("GET", "/feedback")["body"])
+
+    def test_feedback_route_saves_and_lists_group_and_session_context(self):
+        group_id = self.app.database.add_group("Sprint Group Feedback")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+        saved = self.call(
+            "POST",
+            "/feedback",
+            {
+                "slowed_down": "  Finding the next athlete  ",
+                "worked_well": "Enter to save",
+                "wished_for": "A visible queue",
+                "group_id": str(group_id),
+                "session_id": str(session_id),
+            },
+            form=True,
+        )
+        self.assertEqual(saved["status"], "303 See Other")
+        self.assertEqual(saved["header_map"]["Location"], "/feedback")
+        listing = self.call("GET", "/feedback")
+        self.assertIn(b"Finding the next athlete", listing["body"])
+        self.assertIn(b"Sprint Group Feedback", listing["body"])
+        self.assertIn(b"Session ", listing["body"])
+
+    def test_feedback_listing_uses_controlled_chronological_order(self):
+        oldest_id = self.app.database.add_feedback("Oldest feedback", "", "")
+        newest_id = self.app.database.add_feedback("Newest feedback", "", "")
+        middle_id = self.app.database.add_feedback("Middle feedback", "", "")
+        with self.app.database.connect() as connection:
+            connection.execute(
+                "UPDATE prototype_feedback SET created_at=? WHERE id=?", ("2026-07-01 09:00:00", oldest_id)
+            )
+            connection.execute(
+                "UPDATE prototype_feedback SET created_at=? WHERE id=?", ("2026-07-03 09:00:00", newest_id)
+            )
+            connection.execute(
+                "UPDATE prototype_feedback SET created_at=? WHERE id=?", ("2026-07-02 09:00:00", middle_id)
+            )
+
+        body = self.call("GET", "/feedback")["body"].decode()
+        self.assertLess(body.index("Newest feedback"), body.index("Middle feedback"))
+        self.assertLess(body.index("Middle feedback"), body.index("Oldest feedback"))
+
+    def test_feedback_rejects_empty_responses_and_invalid_context(self):
+        blank = self.call("POST", "/feedback", {}, form=True)
+        invalid = self.call("POST", "/feedback", {"slowed_down": "Slow", "group_id": "99999"}, form=True)
+        self.assertEqual(blank["status"], "400 Bad Request")
+        self.assertEqual(invalid["status"], "404 Not Found")
+
+    def test_feedback_route_rejects_mismatched_group_and_session(self):
+        selected_group = self.app.database.add_group("Selected Group")
+        other_group = self.app.database.add_group("Other Group")
+        other_session = self.app.database.add_group_session(other_group, "10", "yards")
+        response = self.call(
+            "POST",
+            "/feedback",
+            {"slowed_down": "Wrong context", "group_id": selected_group, "session_id": other_session},
+            form=True,
+        )
+        self.assertEqual(response["status"], "400 Bad Request")
+        self.assertEqual(self.app.database.all_feedback(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

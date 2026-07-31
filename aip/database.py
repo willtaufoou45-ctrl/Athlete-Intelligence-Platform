@@ -57,10 +57,21 @@ CREATE TABLE IF NOT EXISTS session_roster_members (
     PRIMARY KEY (session_id, athlete_id),
     UNIQUE (session_id, position)
 );
+CREATE TABLE IF NOT EXISTS prototype_feedback (
+    id INTEGER PRIMARY KEY,
+    group_id INTEGER REFERENCES training_groups(id) ON DELETE SET NULL,
+    session_id INTEGER REFERENCES sprint_capture_sessions(id) ON DELETE SET NULL,
+    slowed_down TEXT NOT NULL DEFAULT '',
+    worked_well TEXT NOT NULL DEFAULT '',
+    wished_for TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK(length(trim(slowed_down)) > 0 OR length(trim(worked_well)) > 0 OR length(trim(wished_for)) > 0)
+);
 CREATE INDEX IF NOT EXISTS idx_attempt_session_athlete ON sprint_attempts(session_id, athlete_id);
 CREATE INDEX IF NOT EXISTS idx_attempt_athlete_history ON sprint_attempts(athlete_id, captured_at, id);
 CREATE INDEX IF NOT EXISTS idx_group_members_order ON training_group_members(group_id, position);
 CREATE INDEX IF NOT EXISTS idx_session_roster_order ON session_roster_members(session_id, position);
+CREATE INDEX IF NOT EXISTS idx_prototype_feedback_created ON prototype_feedback(created_at DESC, id DESC);
 """
 
 
@@ -177,6 +188,51 @@ class Database:
             query = """SELECT s.*, COUNT(a.id) AS attempt_count
                        FROM sprint_capture_sessions s LEFT JOIN sprint_attempts a ON a.session_id=s.id
                        GROUP BY s.id ORDER BY s.id DESC"""
+            return [dict(row) for row in connection.execute(query)]
+
+    def add_feedback(
+        self,
+        slowed_down: str,
+        worked_well: str,
+        wished_for: str,
+        group_id: int | None = None,
+        session_id: int | None = None,
+    ) -> int:
+        responses = tuple((value or "").strip() for value in (slowed_down, worked_well, wished_for))
+        if not any(responses):
+            raise ValueError("Enter at least one feedback response.")
+        if any(len(value) > 5000 for value in responses):
+            raise ValueError("Each feedback response must be 5,000 characters or fewer.")
+        with self.connect() as connection:
+            if group_id is not None and not connection.execute(
+                "SELECT 1 FROM training_groups WHERE id=?", (group_id,)
+            ).fetchone():
+                raise LookupError("Training Group not found.")
+            if session_id is not None and not connection.execute(
+                "SELECT 1 FROM sprint_capture_sessions WHERE id=?", (session_id,)
+            ).fetchone():
+                raise LookupError("Session not found.")
+            if group_id is not None and session_id is not None and not connection.execute(
+                "SELECT 1 FROM training_group_sessions WHERE group_id=? AND session_id=?",
+                (group_id, session_id),
+            ).fetchone():
+                raise ValueError("The selected session does not belong to the selected Training Group.")
+            return connection.execute(
+                """INSERT INTO prototype_feedback(
+                       group_id, session_id, slowed_down, worked_well, wished_for
+                   ) VALUES (?, ?, ?, ?, ?)""",
+                (group_id, session_id, *responses),
+            ).lastrowid
+
+    def all_feedback(self) -> list[dict]:
+        with self.connect() as connection:
+            query = """SELECT f.*, g.name AS group_name,
+                              s.distance AS session_distance, s.unit AS session_unit,
+                              s.created_at AS session_created_at
+                       FROM prototype_feedback f
+                       LEFT JOIN training_groups g ON g.id=f.group_id
+                       LEFT JOIN sprint_capture_sessions s ON s.id=f.session_id
+                       ORDER BY f.created_at DESC, f.id DESC"""
             return [dict(row) for row in connection.execute(query)]
 
     def add_session(self, distance: str, unit: str) -> int:
