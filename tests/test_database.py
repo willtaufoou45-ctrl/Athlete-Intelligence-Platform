@@ -43,6 +43,77 @@ class DatabaseTests(unittest.TestCase):
         self.db.delete_attempt(first)
         self.assertEqual(min(a["elapsed_ms"] for a in self.db.all_attempts()), 1850)
 
+    def test_training_group_roster_order_persists_across_sessions_and_restart(self):
+        group_id = self.db.add_group("Sprint Group A")
+        first = self.db.add_group_athlete(group_id, "Hudson")
+        second = self.db.add_group_athlete(group_id, "James")
+        first_session = self.db.add_group_session(group_id, "10", "yards")
+        second_session = self.db.add_group_session(group_id, "20", "yards")
+
+        reopened = Database(self.path)
+        self.assertEqual([a["id"] for a in reopened.group_roster(group_id)], [first, second])
+        self.assertEqual([a["id"] for a in reopened.session_athletes(first_session)], [first, second])
+        self.assertEqual([a["id"] for a in reopened.session_athletes(second_session)], [first, second])
+        self.assertEqual(reopened.session_group(first_session)["name"], "Sprint Group A")
+
+    def test_group_session_rejects_athlete_outside_its_roster(self):
+        group_id = self.db.add_group("Sprint Group B")
+        member_id = self.db.add_group_athlete(group_id, "Peter")
+        session_id = self.db.add_group_session(group_id, "10", "meters")
+        outsider_id = self.db.add_athlete("Outside Athlete")
+
+        self.db.add_attempt(session_id, member_id, 1800)
+        with self.assertRaisesRegex(ValueError, "from this session roster"):
+            self.db.add_attempt(session_id, outsider_id, 1750)
+
+    def test_session_roster_does_not_change_after_later_group_addition(self):
+        group_id = self.db.add_group("Stable Roster")
+        original_id = self.db.add_group_athlete(group_id, "Original Athlete")
+        session_id = self.db.add_group_session(group_id, "10", "yards")
+        later_id = self.db.add_group_athlete(group_id, "Later Athlete")
+
+        self.assertEqual([a["id"] for a in self.db.session_athletes(session_id)], [original_id])
+        with self.assertRaisesRegex(ValueError, "from this session roster"):
+            self.db.add_attempt(session_id, later_id, 1750)
+
+    def test_session_roster_survives_group_removal_and_reordering(self):
+        group_id = self.db.add_group("Changing Group")
+        first_id = self.db.add_group_athlete(group_id, "First Athlete")
+        second_id = self.db.add_group_athlete(group_id, "Second Athlete")
+        session_id = self.db.add_group_session(group_id, "10", "yards")
+
+        with self.db.connect() as connection:
+            connection.execute(
+                "DELETE FROM training_group_members WHERE group_id=? AND athlete_id=?", (group_id, first_id)
+            )
+            connection.execute(
+                "UPDATE training_group_members SET position=1 WHERE group_id=? AND athlete_id=?", (group_id, second_id)
+            )
+
+        self.assertEqual(
+            [(a["id"], a["position"]) for a in self.db.session_athletes(session_id)],
+            [(first_id, 1), (second_id, 2)],
+        )
+        self.db.add_attempt(session_id, first_id, 1800)
+
+    def test_legacy_group_session_is_backfilled_once_without_overwrite(self):
+        group_id = self.db.add_group("Legacy Group")
+        first_id = self.db.add_group_athlete(group_id, "First Athlete")
+        session_id = self.db.add_group_session(group_id, "10", "yards")
+
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM session_roster_snapshots WHERE session_id=?", (session_id,))
+        second_id = self.db.add_group_athlete(group_id, "Present At Backfill")
+
+        reopened = Database(self.path)
+        reopened.initialize()
+        self.assertEqual([a["id"] for a in reopened.session_athletes(session_id)], [first_id, second_id])
+
+        reopened.add_group_athlete(group_id, "Added After Backfill")
+        reopened_again = Database(self.path)
+        reopened_again.initialize()
+        self.assertEqual([a["id"] for a in reopened_again.session_athletes(session_id)], [first_id, second_id])
+
 
 if __name__ == "__main__":
     unittest.main()

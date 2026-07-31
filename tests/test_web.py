@@ -119,6 +119,58 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.call("GET", f"/api/sessions/{self.session_id}/athletes/99999")["status"], "404 Not Found")
         self.assertEqual(self.call("POST", "/api/attempts/99999/delete")["status"], "404 Not Found")
 
+    def test_training_group_routes_reuse_ordered_roster_in_new_sessions(self):
+        created_group = self.call("POST", "/groups", {"name": "Sprint Group A"}, form=True)
+        self.assertEqual(created_group["status"], "303 See Other")
+        group_location = created_group["header_map"]["Location"]
+        group_id = int(group_location.rsplit("/", 1)[-1])
+
+        self.call("POST", f"/groups/{group_id}/athletes", {"name": "Hudson"}, form=True)
+        self.call("POST", f"/groups/{group_id}/athletes", {"name": "James"}, form=True)
+        created_session = self.call(
+            "POST", f"/groups/{group_id}/sessions", {"distance": "10", "unit": "yards"}, form=True
+        )
+        session_id = int(created_session["header_map"]["Location"].rsplit("/", 1)[-1])
+        roster = self.app.database.session_athletes(session_id)
+
+        self.assertEqual([athlete["name"] for athlete in roster], ["Hudson", "James"])
+        capture_page = self.call("GET", f"/sessions/{session_id}")
+        self.assertIn(b"Move through the training order", capture_page["body"])
+        self.assertIn(b"Hudson", capture_page["body"])
+        self.assertIn(b"James", capture_page["body"])
+
+    def test_group_roster_is_reused_by_later_session(self):
+        group_id = self.app.database.add_group("Recurring Team")
+        first = self.app.database.add_group_athlete(group_id, "First Runner")
+        second = self.app.database.add_group_athlete(group_id, "Second Runner")
+        first_session = self.app.database.add_group_session(group_id, "10", "yards")
+        second_session = self.app.database.add_group_session(group_id, "10", "yards")
+
+        self.assertEqual([a["id"] for a in self.app.database.session_athletes(first_session)], [first, second])
+        self.assertEqual([a["id"] for a in self.app.database.session_athletes(second_session)], [first, second])
+
+    def test_earlier_capture_page_keeps_its_roster_after_group_changes(self):
+        group_id = self.app.database.add_group("Snapshot Team")
+        original_id = self.app.database.add_group_athlete(group_id, "Original Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+        later_id = self.app.database.add_group_athlete(group_id, "Later Runner")
+
+        capture_page = self.call("GET", f"/sessions/{session_id}")
+        self.assertIn(b"Original Runner", capture_page["body"])
+        self.assertNotIn(b"Later Runner", capture_page["body"])
+        rejected = self.call(
+            "POST",
+            f"/api/sessions/{session_id}/attempts",
+            {"athlete_id": later_id, "elapsed_seconds": "1.75"},
+        )
+        accepted = self.call(
+            "POST",
+            f"/api/sessions/{session_id}/attempts",
+            {"athlete_id": original_id, "elapsed_seconds": "1.80"},
+        )
+        self.assertEqual(rejected["status"], "400 Bad Request")
+        self.assertEqual(accepted["status"], "201 Created")
+
 
 if __name__ == "__main__":
     unittest.main()

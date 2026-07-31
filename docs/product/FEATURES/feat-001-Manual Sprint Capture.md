@@ -2,7 +2,8 @@
 
 ## Status
 
-Approved for a functional local prototype. Implementation has not started.
+Implemented as a functional local prototype. FEAT-001.1 workflow improvements
+are implemented locally and awaiting field validation.
 
 ## Problem
 

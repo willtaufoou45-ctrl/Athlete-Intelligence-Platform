@@ -24,115 +24,71 @@ Status: **MVP candidate**
 Canonical specification:
 [FEAT-001 — Manual Sprint Capture](FEATURES/feat-001-Manual%20Sprint%20Capture.md)
 
-# FEAT-002 — Athlete Check-In
+### FEAT-001.1 — Workflow Friction Improvements
+
+Status: **Implemented locally; awaiting field validation**
+
+Adds persistent Training Groups, persistent ordered rosters, automatic roster
+reuse for new sessions, previous/next athlete navigation, and searchable
+out-of-order athlete selection.
+
+Canonical specification:
+[FEAT-001.1 — Workflow Friction Improvements](FEATURES/feat-001.1-Workflow-Friction-Improvements.md)
+
+## V2 Improvements
+
+### Historical Performance Context
+
+The active capture screen should show a compact comparison between today's
+performance and the athlete's previous comparable results without adding
+historical attempts to the active-session list.
+
+Comparable results must match the athlete, exact distance, and exact unit.
+
+# FEAT-002 — Training Groups & Persistent Rosters
+
+## Status
+
+Discovery
+
+The initial persistent-group and roster workflow is implemented in FEAT-001.1.
+Further changes remain discovery work until field validation is complete.
 
 ## Problem
 
-Coaches do not know exactly which athletes are present until practice begins. Attendance is tracked informally, making it difficult to manage testing, organize groups, identify missing athletes, and prepare the session efficiently. If were expecting 60 kids and only have forty, we have to scroll through google sheet to find each kid.
+Creating athlete lists before every session creates unnecessary setup work.
 
-As practice grows larger, coaches spend valuable time determining who is present instead of coaching.
+## Goal
 
----
+Allow coaches to create recurring training groups once and automatically reuse
+their roster, athlete order, and session history every time they train.
 
-## Why This Matters
+# FEAT-003 — Roster Import & Group Management
 
-The beginning of practice sets the tone for the entire session.
+## Status
 
-If attendance is unclear, every workflow that follows becomes more difficult, including:
+Discovery
 
-- Sprint testing
-- Force plate testing
-- Weight room organization
-- Athlete grouping
-- Parent communication
-- Practice review
+## Problem
 
-Knowing who is present should require little to no effort from the coach.
+Large teams cannot be efficiently created or managed through manual athlete
+entry.
 
----
+## Goal
 
-## Evidence
+Allow coaches to import large rosters once, organize athletes into recurring
+subgroups, and reuse those groups across every training session.
 
-### Workflow
+## Potential future capabilities
 
-- Before Practice
-- Athlete Arrival
+- Paste from Excel or Google Sheets
+- CSV import
+- Bulk athlete creation
+- Persistent subgroup management
+- Move athletes between groups
+- Copy previous season roster
 
-### Practice OS
-
-- Coach reviews roster before practice.
-- Coach prepares testing based on expected attendance.
-- Coach needs to know who is available before training begins.
-
-### Field Notes
-
-- Attendance is currently determined by observation.
-- Coaches often adjust groups after practice has already started.
-- Injured and late athletes require additional attention and disrupt the normal workflow.
-
----
-
-## Current Process
-
-1. Coach arrives before practice.
-2. Coach estimates who will attend.
-3. Athletes gradually arrive.
-4. Coach mentally tracks attendance.
-5. Coach adjusts testing groups based on who is present.
-6. Coach determines who is missing after practice has already started.
-
-This process relies heavily on memory and observation.
-
----
-
-## Desired Outcome
-
-- Athletes check into practice with minimal effort.
-- Coaches immediately know who is present, absent, late, or limited.
-- Attendance automatically updates throughout practice.
-- Testing groups are created from the current roster.
-- Coaches begin practice fully organized.
-
----
-
-## Possible Solutions
-
-- Athlete self check-in.
-- Coach check-in.
-- QR code check-in.
-- Team attendance dashboard.
-- Injury or limitation status during check-in.
-- Automatic testing group assignments based on attendance.
-
----
-
-## Primary User
-
-Coach
-
----
-
-## Success Metrics
-
-- Coach no longer tracks attendance manually.
-- Attendance is complete before training begins.
-- Testing groups are organized automatically.
-- Time spent organizing athletes before practice is reduced.
-- Coaches begin practice focused on coaching rather than administration.
-
----
-
-## Target Release
-
-**MVP**
-
----
-
-## Notes
-
-Attendance is the starting point for every practice workflow. Accurate athlete check-in allows testing, grouping, programming, reporting, and communication to operate from a single source of truth. Attendance would also be a metric to show why an athlete imporoved or did not.
-
-# FEAT-003 — Athlete Focus Memory
+# FEAT-004 — Athlete Focus Memory
 
 ## Category
 
@@ -290,7 +246,7 @@ The goal is to preserve the reasoning behind coaching decisions so every session
 
 The platform becomes an extension of the coach's memory rather than another database to manage.
 
-# FEAT-004 — Athlete Queue
+# FEAT-005 — Athlete Queue
 
 ## Category
 

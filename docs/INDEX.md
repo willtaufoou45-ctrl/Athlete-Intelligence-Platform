@@ -13,6 +13,7 @@ documented** are intentional gaps, not missing links.
 # Product
 
 - [Feature Backlog](product/FEATURE_BACKLOG.md)
+- [Product Decisions](product/PRODUCT_DECISIONS.md)
 - MVP — **Not yet documented**
 - Roadmap — **Not yet documented**
 - [Practice OS](product/PRACTICE_OS.md)
@@ -22,10 +23,12 @@ documented** are intentional gaps, not missing links.
 ## Features
 
 - [FEAT-001 — Manual Sprint Capture](product/FEATURES/feat-001-Manual%20Sprint%20Capture.md) — Approved for local prototype
-  - [Field review](product/FEATURE_REVIEWS/FEAT-001-Review.md) — Template; not started
-- [FEAT-002 — Athlete Check-In](product/FEATURE_BACKLOG.md#feat-002--athlete-check-in) — Backlog
-- [FEAT-003 — Athlete Focus Memory](product/FEATURE_BACKLOG.md#feat-003--athlete-focus-memory) — Backlog
-- [FEAT-004 — Athlete Queue](product/FEATURE_BACKLOG.md#feat-004--athlete-queue) — Backlog
+  - [FEAT-001.1 — Workflow Friction Improvements](product/FEATURES/feat-001.1-Workflow-Friction-Improvements.md) — Implemented locally; awaiting field validation
+  - [Field review](product/FEATURE_REVIEWS/FEAT-001-Review.md) — Field observations recorded
+- [FEAT-002 — Training Groups & Persistent Rosters](product/FEATURE_BACKLOG.md#feat-002--training-groups--persistent-rosters) — Discovery
+- [FEAT-003 — Roster Import & Group Management](product/FEATURE_BACKLOG.md#feat-003--roster-import--group-management) — Discovery
+- [FEAT-004 — Athlete Focus Memory](product/FEATURE_BACKLOG.md#feat-004--athlete-focus-memory) — Backlog
+- [FEAT-005 — Athlete Queue](product/FEATURE_BACKLOG.md#feat-005--athlete-queue) — Backlog
 
 # Intelligence
 
@@ -48,3 +51,12 @@ documented** are intentional gaps, not missing links.
 - Parent Communication — **Not yet documented**
 - Weekly Workflow — **Not yet documented**
 - Season Report — **Not yet documented**
+
+# Workflow Intelligence
+
+- [Workflow Intelligence Index](workflow_intelligence/INDEX.md)
+- [WI-001 — Athlete Flow](workflow_intelligence/WI-001-Athlete-Flow.md)
+- [WI-002 — Large Group Workflows](workflow_intelligence/WI-002-Large-Group-Workflows.md)
+- [WI-003 — Session Setup](workflow_intelligence/WI-003-Session-Setup.md)
+- [WI-004 — Coach Attention](workflow_intelligence/WI-004-Coach-Attention.md)
+- [WI-005 — Data Capture](workflow_intelligence/WI-005-Data-Capture.md)

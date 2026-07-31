@@ -28,6 +28,11 @@ and current documentation gaps.
 FEAT-001 is implemented as a single-coach local prototype. It is intended for
 workflow validation, not production deployment.
 
+FEAT-001.1 adds recurring Training Groups, persistent ordered rosters, automatic
+roster reuse with an immutable roster snapshot for each new group session, and
+previous/next athlete navigation with a searchable out-of-order fallback. These
+improvements are implemented locally and awaiting field validation.
+
 ## Run the application
 
 From the repository root:
