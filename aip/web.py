@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 from pathlib import Path
+from time import perf_counter
 from urllib.parse import parse_qs
 
 from .database import Database
@@ -16,11 +17,13 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
     database = Database(database_path)
     database.initialize()
 
-    def app(environ, start_response):
+    def handle_request(environ, start_response):
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/").rstrip("/") or "/"
         parts = [part for part in path.split("/") if part]
         try:
+            if method == "GET" and path == "/diagnostics/ping":
+                return plain_text_response(start_response, "pong\n")
             if method == "GET" and path == "/":
                 return respond(start_response, home_page(database))
             if method == "GET" and path == "/feedback/new":
@@ -105,6 +108,45 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 return json_response(start_response, {"error": str(error)}, "400 Bad Request")
             return respond(start_response, page("Check your entry", f"<h1>Check your entry</h1><p>{html.escape(str(error))}</p><p><a href='/'>Go back</a></p>"), "400 Bad Request")
 
+    def app(environ, start_response):
+        started = perf_counter()
+        captured: dict = {}
+
+        def capture_response(status, headers, exc_info=None):
+            captured["status"] = status
+            captured["headers"] = list(headers)
+            captured["exc_info"] = exc_info
+
+        method = environ.get("REQUEST_METHOD", "GET")
+        path = environ.get("PATH_INFO", "/") or "/"
+        client_ip = environ.get("REMOTE_ADDR") or "-"
+        try:
+            response = handle_request(environ, capture_response)
+        except Exception:
+            elapsed_ms = (perf_counter() - started) * 1000
+            print(f"{client_ip} {method} {path} 500 app={elapsed_ms:.1f}ms bytes=0", flush=True)
+            raise
+
+        elapsed_ms = (perf_counter() - started) * 1000
+        status = captured.get("status", "500 Internal Server Error")
+        headers = [
+            (name, value) for name, value in captured.get("headers", [])
+            if name.lower() != "server-timing"
+        ]
+        headers.append(("Server-Timing", f"app;dur={elapsed_ms:.3f}"))
+        if path == "/diagnostics/ping":
+            headers.append(("Cache-Control", "no-store"))
+        body_size = sum(len(chunk) for chunk in response) if isinstance(response, (list, tuple)) else 0
+        if not any(name.lower() == "content-length" for name, _ in headers) and isinstance(response, (list, tuple)):
+            headers.append(("Content-Length", str(body_size)))
+        if captured.get("exc_info") is None:
+            start_response(status, headers)
+        else:
+            start_response(status, headers, captured["exc_info"])
+        status_code = status.split(" ", 1)[0]
+        print(f"{client_ip} {method} {path} {status_code} app={elapsed_ms:.1f}ms bytes={body_size}", flush=True)
+        return response
+
     app.database = database
     return app
 
@@ -122,7 +164,7 @@ def home_page(db: Database) -> str:
     body = f"""
     <header><p class='eyebrow'>Athlete Intelligence Platform</p><h1>Manual sprint capture</h1><p>Reuse a Training Group roster, then start or resume a measurement session.</p></header>
     <main class='home-grid'>
-      <section class='card groups'><h2>Training Groups</h2><form method='post' action='/groups' class='inline-form'><label>Group name<input name='name' maxlength='100' required autofocus placeholder='Park City Football'></label><button>Create group</button></form>{group_items}</section>
+      <section class='card groups'><h2>Training Groups</h2><form method='post' action='/groups' class='inline-form'><label>Group name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Park City Football'></label><button>Create group</button></form>{group_items}</section>
       <section class='card sessions'><h2>Resume a session</h2>{session_items}</section>
       <details class='card legacy'><summary>Standalone capture tools</summary><p class='muted'>Existing FEAT-001 workflows remain available for sessions without a Training Group.</p><h3>Athletes</h3><form method='post' action='/athletes' class='inline-form'><label>Name<input name='name' maxlength='100' required placeholder='Athlete name'></label><button>Add athlete</button></form><ul>{athlete_items}</ul><h3>New standalone session</h3><form method='post' action='/sessions' class='session-form'><label>Distance<input name='distance' inputmode='decimal' required value='10'></label><label>Unit<select name='unit'><option value='yards'>yards</option><option value='meters'>meters</option></select></label><button>Start capture</button></form></details>
     </main>"""
@@ -145,7 +187,7 @@ def group_page(db: Database, group_id: int) -> str:
     body = f"""
     <header><a href='/'>← Training Groups</a><p class='eyebrow'>Recurring Training Group</p><h1>{html.escape(group['name'])}</h1><p>{len(roster)} athletes in persistent training order.</p></header>
     <main class='home-grid'>
-      <section class='card'><h2>Persistent roster</h2><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
+      <section class='card'><h2>Persistent roster</h2><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
       <section class='card'><h2>Start a session</h2><form method='post' action='/groups/{group_id}/sessions' class='session-form'><label>Distance<input name='distance' inputmode='decimal' required value='10'></label><label>Unit<select name='unit'><option value='yards'>yards</option><option value='meters'>meters</option></select></label><button {disabled}>Start with this roster</button></form>{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
       <section class='card sessions'><h2>Session history</h2>{sessions}<h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
     </main>"""
@@ -256,7 +298,7 @@ def feedback_list_page(db: Database) -> str:
 
 
 def page(title: str, body: str) -> str:
-    return f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{html.escape(title)} · AIP</title><style>{STYLES}</style></head><body><nav class='prototype-nav'><a class='button-link' href='/feedback/new'>Send Feedback</a></nav>{body}</body></html>"
+    return f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{html.escape(title)} · AIP</title><style>{STYLES}</style></head><body><nav class='prototype-nav'><a class='button-link' href='/feedback/new'>Send Feedback</a></nav>{body}<script>{DESKTOP_FOCUS_SCRIPT}</script></body></html>"
 
 
 def form_data(environ) -> dict[str, str]:
@@ -313,6 +355,12 @@ def csv_response(start_response, payload: bytes, filename: str):
     return [payload]
 
 
+def plain_text_response(start_response, content: str, status: str = "200 OK"):
+    payload = content.encode()
+    start_response(status, [("Content-Type", "text/plain; charset=utf-8"), ("Content-Length", str(len(payload)))])
+    return [payload]
+
+
 def redirect(start_response, location: str):
     start_response("303 See Other", [("Location", location), ("Content-Length", "0")])
     return [b""]
@@ -321,6 +369,7 @@ def redirect(start_response, location: str):
 CAPTURE_SCRIPT = r"""
 const form=document.querySelector('#capture-form'), athlete=document.querySelector('#athlete'), athleteName=document.querySelector('#athlete-name'), athletePosition=document.querySelector('#athlete-position'), athleteSearch=document.querySelector('#athlete-search'), previousAthlete=document.querySelector('#previous-athlete'), nextAthlete=document.querySelector('#next-athlete'), elapsed=document.querySelector('#elapsed'), feedback=document.querySelector('#feedback'), results=document.querySelector('#results'), save=document.querySelector('#save');
 const sessionId=form.dataset.session;
+const finePointer=window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 let activeIndex=-1;
 const escapeHtml=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 function render(data){
@@ -330,7 +379,7 @@ function render(data){
 }
 async function request(url, body={}){const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not save.');return data;}
 async function loadAthlete(){if(!athlete.value){results.innerHTML='<p class="muted">Select an athlete to see their results.</p>';return;}const response=await fetch(`/api/sessions/${sessionId}/athletes/${athlete.value}`);const data=await response.json();if(response.ok)render(data);else feedback.textContent=data.error||'Could not load results.';}
-async function setAthlete(index){if(!athletes.length)return;activeIndex=(index+athletes.length)%athletes.length;const selected=athletes[activeIndex];athlete.value=selected.id;athleteName.textContent=selected.name;athletePosition.textContent=`Athlete ${activeIndex+1} of ${athletes.length}`;athleteSearch.value='';localStorage.setItem(`aip-session-${sessionId}-athlete`,selected.id);await loadAthlete();elapsed.focus();}
+async function setAthlete(index,focusTime=true){if(!athletes.length)return;activeIndex=(index+athletes.length)%athletes.length;const selected=athletes[activeIndex];athlete.value=selected.id;athleteName.textContent=selected.name;athletePosition.textContent=`Athlete ${activeIndex+1} of ${athletes.length}`;athleteSearch.value='';localStorage.setItem(`aip-session-${sessionId}-athlete`,selected.id);await loadAthlete();if(focusTime)elapsed.focus();}
 previousAthlete.addEventListener('click',()=>setAthlete(activeIndex-1));
 nextAthlete.addEventListener('click',()=>setAthlete(activeIndex+1));
 athleteSearch.addEventListener('change',()=>{const typed=athleteSearch.value.trim().toLowerCase();const index=athletes.findIndex((item,i)=>`${i+1} · ${item.name}`.toLowerCase()===typed||item.name.toLowerCase()===typed);if(index>=0)setAthlete(index);else feedback.textContent='Choose an athlete from the roster.';});
@@ -338,7 +387,15 @@ form.addEventListener('submit',async event=>{event.preventDefault();feedback.tex
 window.editAttempt=async(id,current)=>{const value=prompt('Correct time in seconds:',current);if(value===null)return;try{render(await request(`/api/attempts/${id}/edit`,{elapsed_seconds:value}));feedback.textContent='Attempt updated.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
 window.deleteAttempt=async id=>{if(!confirm('Delete this attempt?'))return;try{render(await request(`/api/attempts/${id}/delete`));feedback.textContent='Attempt deleted.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
 document.addEventListener('keydown',event=>{if(!event.altKey)return;if(event.key==='ArrowRight'){event.preventDefault();setAthlete(activeIndex+1);}else if(event.key==='ArrowLeft'){event.preventDefault();setAthlete(activeIndex-1);}else if(event.key.toLowerCase()==='a'){event.preventDefault();athleteSearch.focus();}});
-const retained=Number(localStorage.getItem(`aip-session-${sessionId}-athlete`));const retainedIndex=athletes.findIndex(item=>item.id===retained);if(athletes.length)setAthlete(retainedIndex>=0?retainedIndex:0);
+const retained=Number(localStorage.getItem(`aip-session-${sessionId}-athlete`));const retainedIndex=athletes.findIndex(item=>item.id===retained);if(athletes.length)setAthlete(retainedIndex>=0?retainedIndex:0,finePointer);
+"""
+
+
+DESKTOP_FOCUS_SCRIPT = r"""
+if(window.matchMedia('(hover: hover) and (pointer: fine)').matches){
+  const target=document.querySelector('[data-desktop-autofocus]');
+  if(target)target.focus();
+}
 """
 
 
@@ -347,4 +404,5 @@ STYLES = """
 .groups,.legacy{grid-column:1/-1}.legacy summary{font-weight:800;cursor:pointer}.roster{list-style:none;padding:0}.roster li{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #e6eae3}.position{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:#e8eee7;font-weight:800}.group-label{font-weight:800;color:#47725d}.capture-card form{gap:18px}.athlete-flow{display:grid;grid-template-columns:52px 1fr 52px;gap:10px;align-items:stretch}.flow-button{font-size:1.5rem;padding:8px}.active-athlete{display:flex;min-height:82px;flex-direction:column;align-items:center;justify-content:center;border:1px solid #b9c3b8;border-radius:12px;background:#f7f8f5}.active-athlete span{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#6d776e}.active-athlete strong{font-size:1.35rem;text-align:center}.jump-label{font-size:.85rem}@media(max-width:720px){.groups,.legacy{grid-column:auto}}
 .prototype-nav{display:flex;justify-content:flex-end}.button-link{display:inline-block;background:#173c2c;color:#fff;text-decoration:none;border-radius:10px;padding:10px 14px;font-weight:800}.feedback-layout{max-width:760px}.feedback-form{display:grid;gap:20px}.feedback-form textarea{font:inherit;resize:vertical;border-radius:10px;border:1px solid #b9c3b8;padding:12px}.feedback-form textarea:focus{outline:3px solid #ffc857;outline-offset:2px}.feedback-context{display:grid;grid-template-columns:1fr 1fr;gap:12px}.feedback-list{display:grid;gap:14px}.feedback-entry h3{margin-bottom:4px;font-size:1rem}.feedback-entry p{white-space:pre-wrap}@media(max-width:720px){.feedback-context{grid-template-columns:1fr}}
 .export-form{display:flex;align-items:end;gap:10px;margin-top:14px}.export-form label{flex:1}@media(max-width:720px){.export-form{align-items:stretch;flex-direction:column}}
+a,button,summary{touch-action:manipulation}a:active,button:active,summary:active{opacity:.72}
 """

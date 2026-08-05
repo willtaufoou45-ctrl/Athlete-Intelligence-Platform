@@ -2,10 +2,32 @@ import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlencode
 
 from aip.web import create_app
+
+
+class InteractiveNestingParser(HTMLParser):
+    interactive = {"a", "button", "input", "select", "textarea", "summary"}
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.nested = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.interactive and any(parent in self.interactive for parent in self.stack):
+            self.nested.append(tag)
+        if tag not in {"input"}:
+            self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag in self.stack:
+            index = len(self.stack) - 1 - self.stack[::-1].index(tag)
+            self.stack = self.stack[:index]
 
 
 class WebTests(unittest.TestCase):
@@ -25,6 +47,7 @@ class WebTests(unittest.TestCase):
             "PATH_INFO": path,
             "CONTENT_LENGTH": str(len(payload)),
             "CONTENT_TYPE": "application/x-www-form-urlencoded" if form else "application/json",
+            "REMOTE_ADDR": "192.168.0.27",
             "wsgi.input": io.BytesIO(payload),
         }
         response = {}
@@ -113,6 +136,39 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/sessions/not-a-number")["status"], "400 Bad Request")
         self.assertEqual(self.call("POST", "/api/attempts/not-a-number/edit", {"elapsed_seconds": "1.8"})["status"], "400 Bad Request")
 
+    def test_diagnostic_ping_is_tiny_plain_text_with_timing_headers(self):
+        response = self.call("GET", "/diagnostics/ping")
+        self.assertEqual(response["status"], "200 OK")
+        self.assertEqual(response["body"], b"pong\n")
+        self.assertEqual(response["header_map"]["Content-Type"], "text/plain; charset=utf-8")
+        self.assertEqual(response["header_map"]["Content-Length"], "5")
+        self.assertRegex(response["header_map"]["Server-Timing"], r"^app;dur=\d+\.\d{3}$")
+        self.assertEqual(response["header_map"]["Cache-Control"], "no-store")
+
+    def test_request_log_contains_client_method_path_status_timing_and_size(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            response = self.call("GET", "/diagnostics/ping")
+        self.assertEqual(response["status"], "200 OK")
+        self.assertRegex(
+            output.getvalue().strip(),
+            r"^192\.168\.0\.27 GET /diagnostics/ping 200 app=\d+\.\dms bytes=5$",
+        )
+
+    def test_request_diagnostics_do_not_disable_caching_for_application_responses(self):
+        page_response = self.call("GET", "/")
+        redirect_response = self.call(
+            "POST",
+            "/athletes",
+            {"name": "Timed Runner"},
+            form=True,
+        )
+
+        for response in (page_response, redirect_response):
+            self.assertIn("Server-Timing", response["header_map"])
+            self.assertNotIn("Cache-Control", response["header_map"])
+            self.assertIn("Content-Length", response["header_map"])
+
     def test_nonexistent_resources_return_not_found(self):
         self.assertEqual(self.call("GET", "/sessions/99999")["status"], "404 Not Found")
         self.assertEqual(self.call("GET", f"/api/sessions/99999/athletes/{self.athlete_id}")["status"], "404 Not Found")
@@ -182,6 +238,35 @@ class WebTests(unittest.TestCase):
         self.assertIn(f"/groups/{group_id}/export.csv".encode(), group_page["body"])
         self.assertIn(b"Export Session CSV", session_page["body"])
         self.assertIn(f"/sessions/{session_id}/export.csv".encode(), session_page["body"])
+
+    def test_primary_mobile_controls_are_direct_semantic_destinations_without_nesting(self):
+        group_id = self.app.database.add_group("Mobile Navigation Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+        pages = [
+            self.call("GET", "/")["body"].decode(),
+            self.call("GET", f"/groups/{group_id}")["body"].decode(),
+            self.call("GET", f"/sessions/{session_id}")["body"].decode(),
+            self.call("GET", "/feedback")["body"].decode(),
+        ]
+        combined = "".join(pages)
+        self.assertIn(f"href='/groups/{group_id}'", combined)
+        self.assertIn(f"href='/sessions/{session_id}'", combined)
+        self.assertIn("href='/feedback/new'", combined)
+        self.assertIn(f"href='/sessions/{session_id}/export.csv'", combined)
+        for markup in pages:
+            parser = InteractiveNestingParser()
+            parser.feed(markup)
+            self.assertEqual(parser.nested, [])
+
+    def test_initial_input_focus_is_limited_to_fine_pointer_devices(self):
+        home = self.call("GET", "/")["body"].decode()
+        session = self.call("GET", f"/sessions/{self.session_id}")["body"].decode()
+        self.assertNotIn(" autofocus", home)
+        self.assertIn("data-desktop-autofocus", home)
+        self.assertIn("(hover: hover) and (pointer: fine)", home)
+        self.assertIn("setAthlete(retainedIndex>=0?retainedIndex:0,finePointer)", session)
+        self.assertIn("touch-action:manipulation", home)
 
     def test_feedback_button_and_form_are_visible(self):
         home = self.call("GET", "/")

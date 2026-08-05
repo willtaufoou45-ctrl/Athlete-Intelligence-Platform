@@ -1,9 +1,16 @@
 """Run the local FEAT-001 application."""
 
 from argparse import ArgumentParser
-from wsgiref.simple_server import make_server
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIServer, make_server
 
 from aip import create_app
+
+
+class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
+    """Keep one browser connection from blocking other local clients."""
+
+    daemon_threads = True
 
 
 def main() -> None:
@@ -13,7 +20,7 @@ def main() -> None:
     parser.add_argument("--database", default="data/aip.sqlite3")
     args = parser.parse_args()
     app = create_app(args.database)
-    with make_server(args.host, args.port, app) as server:
+    with make_server(args.host, args.port, app, server_class=ThreadedWSGIServer) as server:
         print("AIP is running at:")
         print(f"  http://127.0.0.1:{args.port}")
         print(f"  http://192.168.0.30:{args.port}")
