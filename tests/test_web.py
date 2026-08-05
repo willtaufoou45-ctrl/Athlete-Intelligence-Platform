@@ -58,6 +58,31 @@ class WebTests(unittest.TestCase):
         response["header_map"] = dict(response["headers"])
         return response
 
+    def upload_csv(self, path, csv_payload, **fields):
+        boundary = "AIPHistoricalImportBoundary"
+        chunks = []
+        for name, value in fields.items():
+            chunks.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode()
+            )
+        chunks.extend([
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"csv_file\"; filename=\"history.csv\"\r\nContent-Type: text/csv\r\n\r\n".encode(),
+            csv_payload,
+            f"\r\n--{boundary}--\r\n".encode(),
+        ])
+        payload = b"".join(chunks)
+        environ = {
+            "REQUEST_METHOD": "POST", "PATH_INFO": path, "CONTENT_LENGTH": str(len(payload)),
+            "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}", "REMOTE_ADDR": "192.168.0.27",
+            "wsgi.input": io.BytesIO(payload),
+        }
+        response = {}
+        def start(status, headers):
+            response["status"], response["headers"] = status, headers
+        response["body"] = b"".join(self.app(environ, start))
+        response["header_map"] = dict(response["headers"])
+        return response
+
     @staticmethod
     def body(response):
         return json.loads(response["body"])
@@ -238,6 +263,44 @@ class WebTests(unittest.TestCase):
         self.assertIn(f"/groups/{group_id}/export.csv".encode(), group_page["body"])
         self.assertIn(b"Export Session CSV", session_page["body"])
         self.assertIn(f"/sessions/{session_id}/export.csv".encode(), session_page["body"])
+
+    def test_historical_import_upload_previews_without_writing_and_requires_resolutions(self):
+        group_id = self.app.database.add_group("Historical Group")
+        self.app.database.add_group_athlete(group_id, "Jordan Lee")
+        sessions_before = len(self.app.database.all_sessions())
+        attempts_before = len(self.app.database.all_attempts())
+        csv_payload = b"Title\nFirst Name,Last Name,FASTEST,1/15\nJordan,Lee,1.60,fast\nNew,Runner,,1.90\n"
+        upload_page = self.call("GET", f"/groups/{group_id}/imports/new")
+        preview = self.upload_csv(
+            f"/groups/{group_id}/imports/preview", csv_payload,
+            distance="10", unit="yards", year="2024",
+        )
+        self.assertIn(b"Import historical sprint CSV", self.call("GET", f"/groups/{group_id}")["body"])
+        self.assertIn(b"Nothing is saved until", upload_page["body"])
+        self.assertIn(b"No-write preview", preview["body"])
+        self.assertIn(b"FASTEST", preview["body"])
+        self.assertIn(b"unmatched", preview["body"])
+        self.assertIn(b"row 3 / column 4", preview["body"])
+        self.assertEqual(len(self.app.database.all_sessions()), sessions_before)
+        self.assertEqual(len(self.app.database.all_attempts()), attempts_before)
+
+    def test_historical_import_web_confirmation_persists_reviewed_results(self):
+        group_id = self.app.database.add_group("Historical Confirm Group")
+        athlete_id = self.app.database.add_group_athlete(group_id, "Jordan Lee")
+        csv_payload = b"First Name,Last Name,2024-01-15\nJordan,Lee,1.72\n"
+        preview_response = self.upload_csv(
+            f"/groups/{group_id}/imports/preview", csv_payload, distance="10", unit="yards",
+        )
+        self.assertEqual(preview_response["status"], "200 OK")
+        token = next(iter(self.app.import_previews))
+        confirmed = self.call(
+            "POST", f"/groups/{group_id}/imports/confirm",
+            {"preview_token": token, "resolution_2": f"existing:{athlete_id}"}, form=True,
+        )
+        self.assertEqual(confirmed["status"], "200 OK")
+        self.assertIn(b"Historical sprint import confirmed", confirmed["body"])
+        self.assertEqual(len(self.app.database.all_attempts()), 1)
+        self.assertEqual(self.app.import_previews, {})
 
     def test_primary_mobile_controls_are_direct_semantic_destinations_without_nesting(self):
         group_id = self.app.database.add_group("Mobile Navigation Group")

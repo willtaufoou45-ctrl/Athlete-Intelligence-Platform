@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import html
 import json
+import secrets
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import parse_qs
@@ -11,11 +14,13 @@ from urllib.parse import parse_qs
 from .database import Database
 from .domain import classify_attempts, format_seconds, normalize_distance, seconds_to_milliseconds
 from .export import export_filename, parse_export_dates, sprint_export_csv
+from .importer import build_preview, confirm_import
 
 
 def create_app(database_path: str | Path = "data/aip.sqlite3"):
     database = Database(database_path)
     database.initialize()
+    import_previews: dict[str, dict] = {}
 
     def handle_request(environ, start_response):
         method = environ.get("REQUEST_METHOD", "GET")
@@ -64,6 +69,45 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
             if method == "POST" and path == "/groups":
                 group_id = database.add_group(form_data(environ).get("name", ""))
                 return redirect(start_response, f"/groups/{group_id}")
+            if method == "GET" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["imports", "new"]:
+                return respond(start_response, import_upload_page(database, resource_id(parts[1], "Training Group")))
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["imports", "preview"]:
+                group_id = resource_id(parts[1], "Training Group")
+                fields, files = multipart_form(environ)
+                upload = files.get("csv_file")
+                if not upload or not upload["payload"]:
+                    raise ValueError("Choose a CSV file to preview.")
+                year_text = fields.get("year", "").strip()
+                preview = build_preview(
+                    database, upload["payload"], upload["filename"], group_id,
+                    fields.get("distance", ""), fields.get("unit", ""), int(year_text) if year_text else None,
+                )
+                if len(import_previews) >= 20:
+                    import_previews.pop(next(iter(import_previews)))
+                token = secrets.token_urlsafe(24)
+                import_previews[token] = preview
+                return respond(start_response, import_preview_page(database, token, preview))
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["imports", "confirm"]:
+                group_id = resource_id(parts[1], "Training Group")
+                data = form_data(environ)
+                token = data.get("preview_token", "")
+                preview = import_previews.get(token)
+                if not preview or preview["group_id"] != group_id:
+                    raise ValueError("This import preview expired. Upload the CSV again.")
+                resolutions = {
+                    athlete["source_row"]: data.get(f"resolution_{athlete['source_row']}", "")
+                    for athlete in preview["athletes"]
+                }
+                conflicts = {
+                    conflict["date"]: data.get(f"conflict_{conflict['date']}", "")
+                    for conflict in preview["conflicts"]
+                }
+                summary = confirm_import(
+                    database, preview, resolutions, conflicts,
+                    acknowledge_issues=data.get("acknowledge_issues") == "yes",
+                )
+                import_previews.pop(token, None)
+                return respond(start_response, import_summary_page(database, group_id, summary))
             if method == "GET" and len(parts) == 2 and parts[0] == "groups":
                 return respond(start_response, group_page(database, resource_id(parts[1], "Training Group")))
             if method == "POST" and len(parts) == 3 and parts[0] == "groups" and parts[2] == "athletes":
@@ -148,6 +192,7 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
         return response
 
     app.database = database
+    app.import_previews = import_previews
     return app
 
 
@@ -189,9 +234,97 @@ def group_page(db: Database, group_id: int) -> str:
     <main class='home-grid'>
       <section class='card'><h2>Persistent roster</h2><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
       <section class='card'><h2>Start a session</h2><form method='post' action='/groups/{group_id}/sessions' class='session-form'><label>Distance<input name='distance' inputmode='decimal' required value='10'></label><label>Unit<select name='unit'><option value='yards'>yards</option><option value='meters'>meters</option></select></label><button {disabled}>Start with this roster</button></form>{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
-      <section class='card sessions'><h2>Session history</h2>{sessions}<h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
+      <section class='card sessions'><h2>Session history</h2>{sessions}<h3>Historical data</h3><p><a class='button-link' href='/groups/{group_id}/imports/new'>Import historical sprint CSV</a></p><h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
     </main>"""
     return page(group["name"], body)
+
+
+def import_upload_page(db: Database, group_id: int) -> str:
+    group = db.group(group_id)
+    if not group:
+        raise LookupError("Training Group not found.")
+    body = f"""
+    <header><a href='/groups/{group_id}'>← {html.escape(group['name'])}</a><p class='eyebrow'>FEAT-004</p><h1>Import historical sprint results</h1><p>Upload a wide CSV to preview it. Nothing is saved until you review and confirm.</p></header>
+    <main><section class='card import-card'><form method='post' action='/groups/{group_id}/imports/preview' enctype='multipart/form-data' class='import-form'>
+      <label>CSV file<input type='file' name='csv_file' accept='.csv,text/csv' required></label>
+      <label>Distance<input name='distance' inputmode='decimal' required></label>
+      <label>Unit<select name='unit' required><option value='yards'>yards</option><option value='meters'>meters</option></select></label>
+      <label>Year for month/day headers (optional)<input name='year' inputmode='numeric' pattern='[0-9]{{4}}'></label>
+      <button>Preview import</button>
+    </form></section></main>"""
+    return page("Historical sprint import", body)
+
+
+def import_preview_page(db: Database, token: str, preview: dict) -> str:
+    all_athletes = db.all_athletes()
+    roster_ids = {athlete["id"] for athlete in db.group_roster(preview["group_id"])}
+    detected = "".join(f"<li>Column {item['column']}: {html.escape(item['label'])} → {item['date']}</li>" for item in preview["date_columns"])
+    skipped = "".join(f"<li>Column {item['column']}: {html.escape(item['label'] or '(blank)')} — {html.escape(item['reason'])}</li>" for item in preview["skipped_columns"]) or "<li>None</li>"
+    issue_items = "".join(
+        f"<li>{html.escape(issue_location(item))}{html.escape(item['message'])}</li>"
+        for item in preview["issues"]
+    ) or "<li>None</li>"
+    possible_duplicates = sum(1 for item in preview["results"] if item.get("possible_duplicate"))
+    unresolved_athletes = sum(1 for item in preview["athletes"] if item["status"] != "matched")
+    candidate_sessions = len({item["source_date"] for item in preview["results"]})
+    athlete_controls = []
+    for athlete in preview["athletes"]:
+        options = []
+        selected_id = athlete["athlete_id"]
+        if athlete["status"] != "matched":
+            options.append("<option value=''>Choose a resolution</option>")
+        for existing in all_athletes:
+            selected = " selected" if existing["id"] == selected_id else ""
+            roster_note = "" if existing["id"] in roster_ids else " (adds to group if outside roster)"
+            options.append(f"<option value='existing:{existing['id']}'{selected}>Use {html.escape(existing['name'])}{roster_note}</option>")
+        options.extend(["<option value='create'>Create athlete and add to group</option>", "<option value='exclude'>Exclude this row</option>"])
+        athlete_controls.append(
+            f"<tr><td>{athlete['source_row']}</td><td>{html.escape(athlete['name'])}</td><td>{athlete['status']}</td>"
+            f"<td><select name='resolution_{athlete['source_row']}' required>{''.join(options)}</select></td></tr>"
+        )
+    conflict_controls = []
+    for conflict in preview["conflicts"]:
+        options = ["<option value=''>Choose a resolution</option>", "<option value='separate'>Create a separate historical session</option>"]
+        options.extend(f"<option value='reuse:{session['id']}'>Reuse session {session['id']} ({session['attempt_count']} attempts)</option>" for session in conflict["sessions"])
+        conflict_controls.append(f"<label>{conflict['date']} existing-session conflict<select name='conflict_{conflict['date']}' required>{''.join(options)}</select></label>")
+    duplicate_warning = f"<p class='notice'>Identical upload already confirmed as batch {preview['identical_batch_id']}. Confirmation is blocked.</p>" if preview["identical_batch_id"] else ""
+    duplicate_dates = any(item["kind"] == "duplicate_date" for item in preview["issues"])
+    blocker = preview["identical_batch_id"] or duplicate_dates
+    acknowledgement = ""
+    if preview["issues"]:
+        acknowledgement = "<label><input type='checkbox' name='acknowledge_issues' value='yes' required> Exclude and acknowledge the listed invalid cells/columns.</label>"
+    body = f"""
+    <header><a href='/groups/{preview['group_id']}/imports/new'>← Start over</a><p class='eyebrow'>No-write preview</p><h1>Review {html.escape(preview['filename'])}</h1><p>{html.escape(preview['group_name'])} · {preview['distance']} {preview['unit']}</p></header>
+    <main class='import-review'><section class='card'><h2>Detected structure</h2><p>Header row {preview['header_row']}; first-name column {preview['first_column']}; last-name column {preview['last_column']}.</p><h3>Confirmed testing dates</h3><ul>{detected}</ul><h3>Skipped columns</h3><ul>{skipped}</ul><p class='muted'>{preview['ordering_note']}</p></section>
+      <section class='card'><h2>Proposed import</h2><ul><li>Up to {candidate_sessions} historical sessions</li><li>{len(preview['athletes'])} source athletes ({unresolved_athletes} require explicit resolution)</li><li>{len(preview['results'])} valid attempts before exclusions</li><li>{possible_duplicates} possible provenance duplicates to skip</li></ul><h2>Issues and exclusions</h2><ul>{issue_items}</ul>{duplicate_warning}</section>
+      <form method='post' action='/groups/{preview['group_id']}/imports/confirm' class='card import-form'>
+        <input type='hidden' name='preview_token' value='{html.escape(token)}'>
+        <h2>Athlete resolutions</h2><table><thead><tr><th>Row</th><th>Source name</th><th>Match</th><th>Resolution</th></tr></thead><tbody>{''.join(athlete_controls)}</tbody></table>
+        {''.join(conflict_controls)}{acknowledgement}
+        <p>Confirmation would process {len(preview['results'])} valid results across {len(preview['date_columns'])} date columns.</p>
+        <button{' disabled' if blocker else ''}>Confirm atomic import</button>
+      </form></main>"""
+    return page("Review historical import", body)
+
+
+def import_summary_page(db: Database, group_id: int, summary: dict) -> str:
+    body = f"""
+    <header><a href='/groups/{group_id}'>← Training Group</a><p class='eyebrow'>Import complete</p><h1>Historical sprint import confirmed</h1></header>
+    <main><section class='card'><h2>Batch {summary['batch_id']}</h2><ul>
+      <li>{summary['sessions_created']} historical sessions created</li><li>{summary['sessions_reused']} sessions reused</li>
+      <li>{summary['created_athletes']} athletes intentionally created</li><li>{summary['attempts_created']} attempts created</li>
+      <li>{summary['duplicates_skipped']} duplicate results skipped</li><li>{summary['excluded_rows']} rows excluded</li>
+      <li>{summary['excluded_issues']} warnings retained for audit</li></ul></section></main>"""
+    return page("Historical import complete", body)
+
+
+def issue_location(issue: dict) -> str:
+    parts = []
+    if issue.get("row"):
+        parts.append(f"row {issue['row']}")
+    if issue.get("column"):
+        parts.append(f"column {issue['column']}")
+    return f"{' / '.join(parts)}: " if parts else ""
 
 
 def session_page(db: Database, session_id: int) -> str:
@@ -305,6 +438,36 @@ def form_data(environ) -> dict[str, str]:
     length = int(environ.get("CONTENT_LENGTH") or 0)
     parsed = parse_qs(environ["wsgi.input"].read(length).decode())
     return {key: values[0] for key, values in parsed.items()}
+
+
+def multipart_form(environ) -> tuple[dict[str, str], dict[str, dict]]:
+    content_type = environ.get("CONTENT_TYPE", "")
+    if not content_type.lower().startswith("multipart/form-data"):
+        raise ValueError("Upload the CSV using the import form.")
+    try:
+        length = int(environ.get("CONTENT_LENGTH") or "0")
+    except ValueError:
+        raise ValueError("The upload length is invalid.") from None
+    if length <= 0 or length > 5_500_000:
+        raise ValueError("CSV uploads must be 5 MB or smaller.")
+    payload = environ["wsgi.input"].read(length)
+    message = BytesParser(policy=policy.default).parsebytes(
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + payload
+    )
+    if not message.is_multipart():
+        raise ValueError("The upload form is malformed.")
+    fields, files = {}, {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        filename = part.get_filename()
+        content = part.get_payload(decode=True) or b""
+        if filename is not None:
+            files[name] = {"filename": Path(filename).name or "upload.csv", "payload": content}
+        else:
+            fields[name] = content.decode(part.get_content_charset() or "utf-8")
+    return fields, files
 
 
 def json_data(environ) -> dict:

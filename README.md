@@ -37,6 +37,13 @@ FEAT-001.2 adds CSV downloads for an individual sprint session or a Training
 Group, with optional session-date filtering for group exports. Exported files
 use the existing persisted sprint records and derived baseline/PR semantics.
 
+FEAT-004 adds reviewed historical sprint import for Summit-style wide CSV files.
+Coaches choose an exact Training Group, distance, and unit; preview detected
+dates, skipped columns, identity resolutions, invalid values, duplicates, and
+session conflicts without database writes; then explicitly confirm one atomic
+import. Imported attempts retain source provenance and continue to use the
+existing chronological baseline/PR calculation semantics.
+
 The prototype also includes a local feedback form for recording workflow
 friction, successful interactions, and desired features. Feedback is stored in
 the same local SQLite database as athletes, Training Groups, sessions, and

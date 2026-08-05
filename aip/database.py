@@ -67,11 +67,35 @@ CREATE TABLE IF NOT EXISTS prototype_feedback (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK(length(trim(slowed_down)) > 0 OR length(trim(worked_well)) > 0 OR length(trim(wished_for)) > 0)
 );
+CREATE TABLE IF NOT EXISTS import_batches (
+    id INTEGER PRIMARY KEY,
+    file_digest TEXT NOT NULL,
+    group_id INTEGER NOT NULL REFERENCES training_groups(id) ON DELETE RESTRICT,
+    distance TEXT NOT NULL,
+    unit TEXT NOT NULL CHECK(unit IN ('yards', 'meters')),
+    original_filename TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    summary TEXT NOT NULL,
+    warnings TEXT NOT NULL DEFAULT '[]',
+    UNIQUE(file_digest, group_id, distance, unit)
+);
+CREATE TABLE IF NOT EXISTS imported_results (
+    id INTEGER PRIMARY KEY,
+    batch_id INTEGER NOT NULL REFERENCES import_batches(id) ON DELETE RESTRICT,
+    attempt_id INTEGER UNIQUE REFERENCES sprint_attempts(id) ON DELETE SET NULL,
+    source_row INTEGER NOT NULL CHECK(source_row > 0),
+    source_column INTEGER NOT NULL CHECK(source_column > 0),
+    source_date TEXT NOT NULL,
+    source_elapsed_ms INTEGER NOT NULL CHECK(source_elapsed_ms > 0),
+    fingerprint TEXT NOT NULL UNIQUE
+);
 CREATE INDEX IF NOT EXISTS idx_attempt_session_athlete ON sprint_attempts(session_id, athlete_id);
 CREATE INDEX IF NOT EXISTS idx_attempt_athlete_history ON sprint_attempts(athlete_id, captured_at, id);
 CREATE INDEX IF NOT EXISTS idx_group_members_order ON training_group_members(group_id, position);
 CREATE INDEX IF NOT EXISTS idx_session_roster_order ON session_roster_members(session_id, position);
 CREATE INDEX IF NOT EXISTS idx_prototype_feedback_created ON prototype_feedback(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_import_batches_scope ON import_batches(group_id, distance, unit);
+CREATE INDEX IF NOT EXISTS idx_imported_results_batch ON imported_results(batch_id, source_row, source_column);
 """
 
 
@@ -234,6 +258,20 @@ class Database:
                        LEFT JOIN sprint_capture_sessions s ON s.id=f.session_id
                        ORDER BY f.created_at DESC, f.id DESC"""
             return [dict(row) for row in connection.execute(query)]
+
+    def import_batch(self, batch_id: int) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM import_batches WHERE id=?", (batch_id,)).fetchone()
+            return dict(row) if row else None
+
+    def import_results(self, batch_id: int) -> list[dict]:
+        with self.connect() as connection:
+            query = """SELECT provenance.*, attempts.session_id, attempts.athlete_id, attempts.elapsed_ms,
+                              attempts.captured_at
+                       FROM imported_results provenance
+                       LEFT JOIN sprint_attempts attempts ON attempts.id=provenance.attempt_id
+                       WHERE provenance.batch_id=? ORDER BY provenance.source_row, provenance.source_column"""
+            return [dict(row) for row in connection.execute(query, (batch_id,))]
 
     def add_session(self, distance: str, unit: str) -> int:
         if unit not in {"yards", "meters"}:
