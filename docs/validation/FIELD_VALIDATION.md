@@ -12,6 +12,11 @@ Use at least three real sprint sessions and at least two prospective updates
 for each case-study athlete before changing the underlying model, unless a
 data-loss or session-blocking defect is found.
 
+## Planned sessions
+
+- [Rigby Young — August 17, 2026](sessions/2026-08-17-rigby.md)
+- [Brody Bradford — August 19, 2026](sessions/2026-08-19-brody.md)
+
 # Loop 1 — Sprint Workflow
 
 ## Before the session
@@ -127,4 +132,3 @@ At the end of the validation window, classify each finding as:
 - **Adjust** — valuable but creates repeatable friction or misunderstanding.
 - **Remove** — adds work without improving coaching.
 - **Investigate** — evidence is insufficient or contradictory.
-
