@@ -216,7 +216,7 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual([athlete["name"] for athlete in roster], ["Hudson", "James"])
         capture_page = self.call("GET", f"/sessions/{session_id}")
-        self.assertIn(b"Move through the training order", capture_page["body"])
+        self.assertIn(b"Next three", capture_page["body"])
         self.assertIn(b"Hudson", capture_page["body"])
         self.assertIn(b"James", capture_page["body"])
 
@@ -251,6 +251,143 @@ class WebTests(unittest.TestCase):
         )
         self.assertEqual(rejected["status"], "400 Bad Request")
         self.assertEqual(accepted["status"], "201 Created")
+
+    def test_active_session_can_add_late_athlete_to_session_and_group(self):
+        group_id = self.app.database.add_group("Late Arrival Group")
+        original_id = self.app.database.add_group_athlete(group_id, "Original Runner")
+        earlier_session = self.app.database.add_group_session(group_id, "10", "yards")
+        active_session = self.app.database.add_group_session(group_id, "10", "yards")
+
+        response = self.call(
+            "POST", f"/sessions/{active_session}/athletes", {"name": "Late Runner"}, form=True
+        )
+
+        self.assertEqual(response["status"], "303 See Other")
+        self.assertEqual(response["header_map"]["Location"], f"/sessions/{active_session}")
+        self.assertEqual([a["id"] for a in self.app.database.session_athletes(earlier_session)], [original_id])
+        self.assertEqual(
+            [a["name"] for a in self.app.database.session_athletes(active_session)],
+            ["Original Runner", "Late Runner"],
+        )
+        self.assertEqual(
+            [a["name"] for a in self.app.database.group_roster(group_id)],
+            ["Original Runner", "Late Runner"],
+        )
+
+    def test_capture_page_shows_next_three_and_autosaves_without_save_button(self):
+        group_id = self.app.database.add_group("Queue Group")
+        for name in ("First", "Second", "Third", "Fourth"):
+            self.app.database.add_group_athlete(group_id, name)
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+
+        body = self.call("GET", f"/sessions/{session_id}")["body"].decode()
+
+        self.assertIn("Next three", body)
+        self.assertIn("id='up-next-list'", body)
+        self.assertIn("setTimeout(saveAttempt,900)", body)
+        self.assertIn("Times save automatically", body)
+        self.assertNotIn("id='save'", body)
+
+    def test_capture_page_prioritizes_live_controls_before_session_management(self):
+        group_id = self.app.database.add_group("Mobile Priority Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+
+        body = self.call("GET", f"/sessions/{session_id}")["body"].decode()
+
+        self.assertLess(body.index("id='athlete-name'"), body.index("id='elapsed'"))
+        self.assertLess(body.index("id='elapsed'"), body.index("Next three"))
+        self.assertLess(body.index("Next three"), body.index("id='results'"))
+        self.assertLess(body.index("id='results'"), body.index("Export Session CSV"))
+        self.assertLess(body.index("Export Session CSV"), body.index("Delete session"))
+        self.assertNotIn("Send Feedback", body)
+
+    def test_athlete_summary_separates_current_attempts_from_comparable_history(self):
+        group_id = self.app.database.add_group("History Group")
+        athlete_id = self.app.database.add_group_athlete(group_id, "History Runner")
+        oldest = self.app.database.add_group_session(group_id, "10", "yards")
+        previous = self.app.database.add_group_session(group_id, "10", "yards")
+        current = self.app.database.add_group_session(group_id, "10", "yards")
+        other_unit = self.app.database.add_group_session(group_id, "10", "meters")
+        with self.app.database.connect() as connection:
+            connection.execute("UPDATE sprint_capture_sessions SET session_date='2026-07-20' WHERE id=?", (oldest,))
+            connection.execute("UPDATE sprint_capture_sessions SET session_date='2026-08-03' WHERE id=?", (previous,))
+            connection.execute("UPDATE sprint_capture_sessions SET session_date='2026-08-10' WHERE id=?", (current,))
+            connection.execute("UPDATE sprint_capture_sessions SET session_date='2026-08-09' WHERE id=?", (other_unit,))
+        self.app.database.add_attempt(oldest, athlete_id, 1650)
+        self.app.database.add_attempt(previous, athlete_id, 1700)
+        current_attempt = self.app.database.add_attempt(current, athlete_id, 1680)
+        self.app.database.add_attempt(other_unit, athlete_id, 1500)
+
+        data = self.body(self.call("GET", f"/api/sessions/{current}/athletes/{athlete_id}"))
+
+        self.assertEqual(data["attempts"], [{"id": current_attempt, "time": "1.68", "status": "attempt", "just_saved": False}])
+        self.assertEqual(data["best"], "1.68")
+        self.assertEqual(data["all_time_best"], {"time": "1.65", "date": "2026-07-20"})
+        self.assertEqual(data["previous_session"], {"best": "1.7", "date": "2026-08-03"})
+
+    def test_history_reference_is_available_before_current_session_has_an_attempt(self):
+        prior = self.app.database.add_session("10", "yards")
+        current = self.app.database.add_session("10", "yards")
+        with self.app.database.connect() as connection:
+            connection.execute("UPDATE sprint_capture_sessions SET session_date='2026-08-01' WHERE id=?", (prior,))
+            connection.execute("UPDATE sprint_capture_sessions SET session_date='2026-08-08' WHERE id=?", (current,))
+        self.app.database.add_attempt(prior, self.athlete_id, 1720)
+
+        data = self.body(self.call("GET", f"/api/sessions/{current}/athletes/{self.athlete_id}"))
+
+        self.assertEqual(data["attempts"], [])
+        self.assertIsNone(data["best"])
+        self.assertEqual(data["all_time_best"], {"time": "1.72", "date": "2026-08-01"})
+        self.assertEqual(data["previous_session"], {"best": "1.72", "date": "2026-08-01"})
+
+    def test_complete_route_separates_active_and_completed_sessions(self):
+        group_id = self.app.database.add_group("Lifecycle Group")
+        athlete_id = self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+
+        completed = self.call("POST", f"/sessions/{session_id}/complete", {}, form=True)
+
+        self.assertEqual(completed["status"], "303 See Other")
+        self.assertEqual(completed["header_map"]["Location"], f"/groups/{group_id}")
+        page = self.call("GET", f"/sessions/{session_id}")["body"]
+        group_page = self.call("GET", f"/groups/{group_id}")["body"]
+        self.assertIn(b"Completed session", page)
+        self.assertIn(b"Capture is closed", page)
+        self.assertNotIn(f"/sessions/{session_id}/athletes".encode(), page)
+        self.assertIn(b"Completed session history", group_page)
+        rejected = self.call(
+            "POST",
+            f"/api/sessions/{session_id}/attempts",
+            {"athlete_id": athlete_id, "elapsed_seconds": "1.70"},
+        )
+        self.assertEqual(rejected["status"], "400 Bad Request")
+
+    def test_session_labels_include_group_date_distance_and_unit(self):
+        group_id = self.app.database.add_group("Clearly Labeled Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+        session = self.app.database.session(session_id)
+
+        group_page = self.call("GET", f"/groups/{group_id}")["body"].decode()
+        session_page = self.call("GET", f"/sessions/{session_id}")["body"].decode()
+        expected = f"Clearly Labeled Group · {session['session_date']} · 10 yards"
+        self.assertIn(expected, group_page)
+        self.assertIn(expected, session_page)
+
+    def test_delete_session_route_permanently_removes_session_and_attempts(self):
+        group_id = self.app.database.add_group("Delete Route Group")
+        athlete_id = self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+        self.app.database.add_attempt(session_id, athlete_id, 1700)
+
+        deleted = self.call("POST", f"/sessions/{session_id}/delete", {}, form=True)
+
+        self.assertEqual(deleted["status"], "303 See Other")
+        self.assertEqual(deleted["header_map"]["Location"], f"/groups/{group_id}")
+        self.assertIsNone(self.app.database.session(session_id))
+        self.assertEqual(self.app.database.all_attempts(), [])
+        self.assertEqual(self.call("GET", f"/sessions/{session_id}")["status"], "404 Not Found")
 
     def test_export_actions_are_visible_on_session_and_group_pages(self):
         group_id = self.app.database.add_group("Export Group")

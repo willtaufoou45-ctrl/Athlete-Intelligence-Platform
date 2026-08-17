@@ -199,3 +199,75 @@ Validated workflow improvement.
 - [FEAT-001 — Manual Sprint Capture](FEATURES/feat-001-Manual%20Sprint%20Capture.md)
 - [FEAT-001.1 — Workflow Friction Improvements](FEATURES/feat-001.1-Workflow-Friction-Improvements.md)
 - [FEAT-001.2 — Sprint Data Export](FEATURES/feat-001.2-Sprint-Data-Export.md)
+
+## PD-006 — Historical imports require explicit identity resolution
+
+### Decision
+
+AIP may normalize surrounding, repeated whitespace and case for athlete
+matching, but it must never silently merge, create, or fuzzily match an athlete
+when importing historical results.
+
+### Evidence
+
+The validated Summit Football `10 yd` spreadsheet contains extra whitespace,
+incomplete names, inconsistent capitalization, grade labels in name fields, and
+similar athlete names. Assigning a result to the wrong athlete would corrupt
+personal records and every future individual or team insight.
+
+### Reasoning
+
+Historical import creates durable coaching evidence. A slower explicit review
+is preferable to an invisible identity error that produces a false personal
+best. One exact normalized match within the selected Training Group may be
+accepted automatically; unmatched or ambiguous names require coach resolution.
+
+### Product Implication
+
+Historical import must provide a no-write preview, explicit athlete resolution,
+invalid-value and duplicate reporting, and atomic confirmation. It must retain
+source provenance so a repeated import can be detected and audited.
+
+### Status
+
+Implemented locally in FEAT-004. Awaiting field validation.
+
+### Related
+
+- [FEAT-004 — Historical Sprint Import](FEATURES/feat-004-Historical-Sprint-Import.md)
+- [PD-004 — Separate Current Results from Historical Context](#pd-004--separate-current-results-from-historical-context)
+- [PD-005 — AIP Is the Sprint Data Source of Truth](#pd-005--aip-is-the-sprint-data-source-of-truth)
+- [WI-005 — Data Capture](../workflow_intelligence/WI-005-Data-Capture.md)
+
+## PD-007 — Active sessions may accept explicit roster changes
+
+### Decision
+
+An active group session may accept an explicit late-athlete addition. The
+athlete is appended to that session's roster snapshot and the persistent
+Training Group roster. Completed and earlier sessions remain unchanged.
+
+### Evidence
+
+Unexpected athletes can arrive after sprint timing has started. Requiring the
+coach to abandon the active workflow or create another session prevents timely
+capture and risks losing the athlete's first result.
+
+### Reasoning
+
+The roster snapshot protects historical truth, but an active session is still
+in progress. A deliberate addition accurately records who participated without
+retroactively changing prior sessions. Completion is the boundary after which
+the roster and results are closed.
+
+### Status
+
+Implemented locally in FEAT-001.3. Awaiting field validation.
+
+### Related
+
+- [FEAT-001.3 — Live Session Workflow](FEATURES/feat-001.3-Live-Session-Workflow.md)
+- [PD-001 — Organize live capture around athlete flow](#pd-001--organize-live-capture-around-athlete-flow)
+- [PD-002 — Training Groups are Persistent](#pd-002--training-groups-are-persistent)
+- [WI-001 — Athlete Flow](../workflow_intelligence/WI-001-Athlete-Flow.md)
+- [WI-003 — Session Setup](../workflow_intelligence/WI-003-Session-Setup.md)

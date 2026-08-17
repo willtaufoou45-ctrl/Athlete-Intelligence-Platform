@@ -37,6 +37,15 @@ FEAT-001.2 adds CSV downloads for an individual sprint session or a Training
 Group, with optional session-date filtering for group exports. Exported files
 use the existing persisted sprint records and derived baseline/PR semantics.
 
+FEAT-001.3 improves the live workflow with late-athlete entry for active group
+sessions, a visible next-three runner queue, automatic time saving, explicit
+session completion, group/date session labels, and confirmed session deletion.
+Completed sessions are read-only; deletion permanently removes that session and
+its attempts while preserving the Training Group roster. The compact mobile
+capture view prioritizes the athlete, time entry, next runners, current-session
+attempts, all-time comparable best, and most recent prior comparable session;
+export and lifecycle controls remain at the bottom of the page.
+
 FEAT-004 adds reviewed historical sprint import for Summit-style wide CSV files.
 Coaches choose an exact Training Group, distance, and unit; preview detected
 dates, skipped columns, identity resolutions, invalid values, duplicates, and

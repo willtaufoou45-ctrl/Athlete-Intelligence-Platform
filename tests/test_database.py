@@ -96,6 +96,55 @@ class DatabaseTests(unittest.TestCase):
         )
         self.db.add_attempt(session_id, first_id, 1800)
 
+    def test_late_athlete_is_added_to_active_session_and_future_group_roster_only(self):
+        group_id = self.db.add_group("Late Athlete Group")
+        original = self.db.add_group_athlete(group_id, "Original Runner")
+        earlier_session = self.db.add_group_session(group_id, "10", "yards")
+        active_session = self.db.add_group_session(group_id, "10", "yards")
+
+        late = self.db.add_session_athlete(active_session, "  Late Runner  ")
+
+        self.assertEqual([a["id"] for a in self.db.session_athletes(earlier_session)], [original])
+        self.assertEqual([a["id"] for a in self.db.session_athletes(active_session)], [original, late])
+        self.assertEqual([a["id"] for a in self.db.group_roster(group_id)], [original, late])
+
+    def test_completed_session_closes_roster_and_attempt_mutation(self):
+        group_id = self.db.add_group("Completed Group")
+        athlete_id = self.db.add_group_athlete(group_id, "Runner")
+        session_id = self.db.add_group_session(group_id, "10", "yards")
+        attempt_id = self.db.add_attempt(session_id, athlete_id, 1700)
+
+        self.db.complete_session(session_id)
+
+        session = self.db.session(session_id)
+        self.assertEqual(session["status"], "completed")
+        self.assertTrue(session["completed_at"])
+        with self.assertRaisesRegex(ValueError, "Completed|completed"):
+            self.db.add_session_athlete(session_id, "Late Runner")
+        with self.assertRaisesRegex(ValueError, "completed"):
+            self.db.add_attempt(session_id, athlete_id, 1650)
+        with self.assertRaisesRegex(ValueError, "completed"):
+            self.db.update_attempt(attempt_id, 1600)
+        with self.assertRaisesRegex(ValueError, "completed"):
+            self.db.delete_attempt(attempt_id)
+
+    def test_delete_session_removes_attempts_and_snapshot_but_preserves_group_roster(self):
+        group_id = self.db.add_group("Deletion Group")
+        athlete_id = self.db.add_group_athlete(group_id, "Runner")
+        session_id = self.db.add_group_session(group_id, "10", "yards")
+        self.db.add_attempt(session_id, athlete_id, 1700)
+
+        returned_group = self.db.delete_session(session_id)
+
+        self.assertEqual(returned_group, group_id)
+        self.assertIsNone(self.db.session(session_id))
+        self.assertEqual(self.db.all_attempts(), [])
+        self.assertEqual([a["id"] for a in self.db.group_roster(group_id)], [athlete_id])
+        with self.db.connect() as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM session_roster_snapshots WHERE session_id=?", (session_id,)
+            ).fetchone())
+
     def test_legacy_group_session_is_backfilled_once_without_overwrite(self):
         group_id = self.db.add_group("Legacy Group")
         first_id = self.db.add_group_athlete(group_id, "First Athlete")

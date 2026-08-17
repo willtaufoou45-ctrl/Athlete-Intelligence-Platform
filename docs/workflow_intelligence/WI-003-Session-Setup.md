@@ -21,10 +21,16 @@ the system could retain.
 A coach should create a Training Group once. Each new session should reuse its
 roster, athlete order, and relevant session history.
 
+An active session must support an explicit late-athlete addition without
+altering earlier sessions. Completing the session establishes the point after
+which its roster and attempts are closed. Active sessions should be separated
+from clearly labeled completed history.
+
 ## Related Product Decisions
 
 - [PD-002 — Training Groups are Persistent](../product/PRODUCT_DECISIONS.md#pd-002--training-groups-are-persistent)
 - [PD-003 — Large Rosters Require Persistent Import and Grouping](../product/PRODUCT_DECISIONS.md#pd-003--large-rosters-require-persistent-import-and-grouping)
+- [PD-007 — Active sessions may accept explicit roster changes](../product/PRODUCT_DECISIONS.md#pd-007--active-sessions-may-accept-explicit-roster-changes)
 
 ## Related Features
 

@@ -18,12 +18,18 @@ pace of the session or shifting attention from coaching to navigation.
 
 ## Product Implications
 
+Show the next three athletes in running order so the coach can call athletes
+forward while timing the current runner. Valid times should save without a
+separate Save tap, while previous/next and out-of-order selection remain
+available.
+
 Live capture should preserve a predefined athlete order or queue and make the
 next athlete immediately available.
 
 ## Related Product Decisions
 
 - [PD-001 — Organize live capture around athlete flow](../product/PRODUCT_DECISIONS.md#pd-001--organize-live-capture-around-athlete-flow)
+- [PD-007 — Active sessions may accept explicit roster changes](../product/PRODUCT_DECISIONS.md#pd-007--active-sessions-may-accept-explicit-roster-changes)
 
 ## Related Features
 

@@ -344,8 +344,9 @@ def confirm_import(database: Database, preview: dict, resolutions: dict[int, str
                 sessions_reused.append(session_id)
             elif resolution == "separate":
                 session_id = connection.execute(
-                    "INSERT INTO sprint_capture_sessions(distance,unit,created_at) VALUES (?,?,?)",
-                    (current["distance"], current["unit"], f"{source_date} 12:00:00"),
+                    """INSERT INTO sprint_capture_sessions(distance,unit,session_date,created_at)
+                       VALUES (?,?,?,?)""",
+                    (current["distance"], current["unit"], source_date, f"{source_date} 12:00:00"),
                 ).lastrowid
                 connection.execute("INSERT INTO training_group_sessions(group_id,session_id) VALUES (?,?)",
                                    (current["group_id"], session_id))

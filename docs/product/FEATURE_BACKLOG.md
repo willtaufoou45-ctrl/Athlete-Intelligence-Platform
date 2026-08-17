@@ -35,6 +35,17 @@ out-of-order athlete selection.
 Canonical specification:
 [FEAT-001.1 — Workflow Friction Improvements](FEATURES/feat-001.1-Workflow-Friction-Improvements.md)
 
+### FEAT-001.3 — Live Session Workflow
+
+Status: **Implemented locally; awaiting field validation**
+
+Adds explicit late-athlete entry for active group sessions, a next-three runner
+queue, automatic attempt saving, open/completed session states, clear
+group/date session labels, and permanent session deletion with confirmation.
+
+Canonical specification:
+[FEAT-001.3 — Live Session Workflow](FEATURES/feat-001.3-Live-Session-Workflow.md)
+
 ## V2 Improvements
 
 ### Historical Performance Context
@@ -88,7 +99,28 @@ subgroups, and reuse those groups across every training session.
 - Move athletes between groups
 - Copy previous season roster
 
-# FEAT-004 — Athlete Focus Memory
+# FEAT-004 — Historical Sprint Import
+
+## Status
+
+Implemented locally. Awaiting field validation.
+
+## Problem
+
+Historical sprint results remain in wide spreadsheets, so AIP cannot answer
+"What was my best?" from the athlete's complete history without manual
+re-entry.
+
+## Goal
+
+Safely transform athlete-row/date-column CSV data into persisted historical
+sessions and attempts through a no-write preview, explicit athlete resolution,
+duplicate protection, and atomic confirmation.
+
+Canonical specification:
+[FEAT-004 — Historical Sprint Import](FEATURES/feat-004-Historical-Sprint-Import.md)
+
+# FEAT-006 — Athlete Focus Memory
 
 ## Category
 
