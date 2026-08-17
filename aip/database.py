@@ -21,6 +21,7 @@ from .intelligence import (
     seed_rigby_case_study,
     seed_brody_case_study,
 )
+from .domain import FLYING_10_PROTOCOL
 
 
 SCHEMA = """
@@ -37,6 +38,21 @@ CREATE TABLE IF NOT EXISTS sprint_capture_sessions (
     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'completed')),
     session_date TEXT NOT NULL DEFAULT (date('now')),
     completed_at TEXT,
+    protocol_key TEXT,
+    protocol_name TEXT,
+    protocol_alias TEXT,
+    total_distance TEXT,
+    timed_distance TEXT,
+    run_in_distance TEXT,
+    protocol_unit TEXT CHECK(protocol_unit IS NULL OR protocol_unit IN ('yards', 'meters')),
+    timed_segment TEXT,
+    start_type TEXT,
+    purpose TEXT,
+    target_attempts INTEGER CHECK(target_attempts IS NULL OR target_attempts > 0),
+    surface_type TEXT,
+    timing_method TEXT,
+    environment TEXT,
+    protocol_notes TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sprint_attempts (
@@ -138,6 +154,7 @@ class Database:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
             self._migrate_session_lifecycle(connection)
+            self._migrate_sprint_protocols(connection)
             self._backfill_legacy_session_rosters(connection)
             connection.executescript(INTELLIGENCE_SCHEMA)
             self._migrate_intelligence_v02(connection)
@@ -407,6 +424,26 @@ class Database:
             connection.execute("ALTER TABLE sprint_capture_sessions ADD COLUMN completed_at TEXT")
 
     @staticmethod
+    def _migrate_sprint_protocols(connection: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(sprint_capture_sessions)")}
+        definitions = {
+            "protocol_key": "TEXT", "protocol_name": "TEXT", "protocol_alias": "TEXT",
+            "total_distance": "TEXT", "timed_distance": "TEXT", "run_in_distance": "TEXT",
+            "protocol_unit": "TEXT", "timed_segment": "TEXT", "start_type": "TEXT",
+            "purpose": "TEXT", "target_attempts": "INTEGER", "surface_type": "TEXT",
+            "timing_method": "TEXT", "environment": "TEXT", "protocol_notes": "TEXT",
+        }
+        for name, sql_type in definitions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE sprint_capture_sessions ADD COLUMN {name} {sql_type}")
+        assignments = ", ".join(f"{name}=?" for name in FLYING_10_PROTOCOL)
+        connection.execute(
+            f"""UPDATE sprint_capture_sessions SET {assignments}
+                WHERE distance='10' AND unit='yards' AND protocol_key IS NULL""",
+            tuple(FLYING_10_PROTOCOL.values()),
+        )
+
+    @staticmethod
     def _backfill_legacy_session_rosters(connection: sqlite3.Connection) -> None:
         legacy_sessions = connection.execute(
             """SELECT gs.session_id, gs.group_id FROM training_group_sessions gs
@@ -566,25 +603,29 @@ class Database:
                        WHERE provenance.batch_id=? ORDER BY provenance.source_row, provenance.source_column"""
             return [dict(row) for row in connection.execute(query, (batch_id,))]
 
-    def add_session(self, distance: str, unit: str) -> int:
+    def add_session(self, distance: str, unit: str, protocol_key: str | None = "__legacy__",
+                    target_attempts: int | None = None, surface_type: str | None = None,
+                    timing_method: str | None = None, environment: str | None = None,
+                    protocol_notes: str | None = None) -> int:
         if unit not in {"yards", "meters"}:
             raise ValueError("Unit must be yards or meters.")
         with self.connect() as connection:
-            return connection.execute(
-                "INSERT INTO sprint_capture_sessions(distance, unit, session_date) VALUES (?, ?, ?)",
-                (distance, unit, date.today().isoformat()),
-            ).lastrowid
+            return self._insert_session(connection, distance, unit, date.today().isoformat(), protocol_key,
+                                        target_attempts, surface_type, timing_method, environment, protocol_notes)
 
-    def add_group_session(self, group_id: int, distance: str, unit: str) -> int:
+    def add_group_session(self, group_id: int, distance: str, unit: str, protocol_key: str | None = "__legacy__",
+                          target_attempts: int | None = None, surface_type: str | None = None,
+                          timing_method: str | None = None, environment: str | None = None,
+                          protocol_notes: str | None = None) -> int:
         if unit not in {"yards", "meters"}:
             raise ValueError("Unit must be yards or meters.")
         with self.connect() as connection:
             if not connection.execute("SELECT 1 FROM training_groups WHERE id=?", (group_id,)).fetchone():
                 raise LookupError("Training Group not found.")
-            session_id = connection.execute(
-                "INSERT INTO sprint_capture_sessions(distance, unit, session_date) VALUES (?, ?, ?)",
-                (distance, unit, date.today().isoformat()),
-            ).lastrowid
+            session_id = self._insert_session(
+                connection, distance, unit, date.today().isoformat(), protocol_key, target_attempts,
+                surface_type, timing_method, environment, protocol_notes
+            )
             connection.execute(
                 "INSERT INTO training_group_sessions(group_id, session_id) VALUES (?, ?)", (group_id, session_id)
             )
@@ -598,6 +639,44 @@ class Database:
                 (session_id, group_id),
             )
             return session_id
+
+    @staticmethod
+    def _insert_session(connection, distance, unit, session_date, protocol_key, target_attempts,
+                        surface_type, timing_method, environment, protocol_notes):
+        if target_attempts is not None and target_attempts not in {2, 4}:
+            raise ValueError("Typical attempt count must be 2 or 4.")
+        if protocol_key == "__legacy__":
+            protocol_key = FLYING_10_PROTOCOL["protocol_key"] if (distance, unit) == ("10", "yards") else None
+        metadata = FLYING_10_PROTOCOL if protocol_key == FLYING_10_PROTOCOL["protocol_key"] else None
+        if protocol_key and metadata is None:
+            raise ValueError("Choose a recognized sprint protocol.")
+        if metadata and (distance != "10" or unit != "yards"):
+            raise ValueError("The 10-yard fly protocol has a 10-yard timed distance.")
+        surface_type = validated_choice(surface_type, "Surface type", {"turf", "track", "court", "grass", "other"})
+        timing_method = validated_choice(timing_method, "Timing method", {"timing-gates", "laser", "video", "hand-timed", "other"})
+        environment = validated_choice(environment, "Environment", {"indoor", "outdoor"})
+        protocol_notes = (protocol_notes or "").strip() or None
+        if protocol_notes and len(protocol_notes) > 1000:
+            raise ValueError("Protocol notes must be 1,000 characters or fewer.")
+        fields = tuple(metadata.values()) if metadata else (None,) * len(FLYING_10_PROTOCOL)
+        cursor = connection.execute(
+            """INSERT INTO sprint_capture_sessions(
+                   distance,unit,session_date,protocol_key,protocol_name,protocol_alias,total_distance,
+                   timed_distance,run_in_distance,protocol_unit,timed_segment,start_type,purpose,target_attempts,
+                   surface_type,timing_method,environment,protocol_notes
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (distance, unit, session_date, *fields, target_attempts, surface_type, timing_method,
+             environment, protocol_notes),
+        )
+        session_id = cursor.lastrowid
+        if metadata is None:
+            connection.execute(
+                """UPDATE sprint_capture_sessions
+                   SET protocol_key=?, protocol_name='Unspecified protocol'
+                   WHERE id=?""",
+                (f"unspecified-session:{session_id}", session_id),
+            )
+        return session_id
 
     def session(self, session_id: int) -> dict | None:
         with self.connect() as connection:
@@ -761,7 +840,8 @@ class Database:
 
     def all_attempts(self) -> list[dict]:
         with self.connect() as connection:
-            query = """SELECT a.*, s.distance, s.unit, s.session_date,
+            query = """SELECT a.*, s.distance, s.unit, s.session_date, s.protocol_key,
+                              s.surface_type, s.timing_method, s.environment,
                               s.created_at AS session_created_at,
                               athletes.name AS athlete_name
                        FROM sprint_attempts a
@@ -799,6 +879,10 @@ class Database:
                 parameters.append(end)
             query = f"""SELECT a.*, athletes.name AS athlete_name,
                                s.distance, s.unit, s.created_at AS session_created_at,
+                               s.protocol_key, s.protocol_name, s.protocol_alias, s.total_distance,
+                               s.timed_distance, s.run_in_distance, s.protocol_unit, s.timed_segment,
+                               s.start_type, s.purpose, s.target_attempts, s.surface_type,
+                               s.timing_method, s.environment, s.protocol_notes,
                                gs.group_id, groups.name AS group_name,
                                roster.position AS roster_position
                         FROM sprint_attempts a
@@ -821,3 +905,10 @@ def normalized_name(value: str, label: str) -> str:
     if not name or len(name) > 100:
         raise ValueError(f"{label} name must be between 1 and 100 characters.")
     return name
+
+
+def validated_choice(value: str | None, label: str, choices: set[str]) -> str | None:
+    value = (value or "").strip() or None
+    if value is not None and value not in choices:
+        raise ValueError(f"Choose a valid {label.lower()}.")
+    return value

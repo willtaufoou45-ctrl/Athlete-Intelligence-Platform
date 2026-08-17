@@ -80,7 +80,12 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 return redirect(start_response, "/")
             if method == "POST" and path == "/sessions":
                 data = form_data(environ)
-                session_id = database.add_session(normalize_distance(data.get("distance", "")), data.get("unit", ""))
+                session_id = database.add_session(
+                    normalize_distance(data.get("distance", "")), data.get("unit", ""),
+                    selected_protocol(data.get("protocol_key")), optional_attempt_count(data.get("target_attempts")),
+                    data.get("surface_type"), data.get("timing_method"), data.get("environment"),
+                    data.get("protocol_notes"),
+                )
                 return redirect(start_response, f"/sessions/{session_id}")
             if method == "POST" and path == "/groups":
                 group_id = database.add_group(form_data(environ).get("name", ""))
@@ -97,6 +102,8 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 preview = build_preview(
                     database, upload["payload"], upload["filename"], group_id,
                     fields.get("distance", ""), fields.get("unit", ""), int(year_text) if year_text else None,
+                    fields.get("surface_type"), fields.get("timing_method"), fields.get("environment"),
+                    fields.get("protocol_notes"),
                 )
                 if len(import_previews) >= 20:
                     import_previews.pop(next(iter(import_previews)))
@@ -134,7 +141,10 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 group_id = resource_id(parts[1], "Training Group")
                 data = form_data(environ)
                 session_id = database.add_group_session(
-                    group_id, normalize_distance(data.get("distance", "")), data.get("unit", "")
+                    group_id, normalize_distance(data.get("distance", "")), data.get("unit", ""),
+                    selected_protocol(data.get("protocol_key")), optional_attempt_count(data.get("target_attempts")),
+                    data.get("surface_type"), data.get("timing_method"), data.get("environment"),
+                    data.get("protocol_notes"),
                 )
                 return redirect(start_response, f"/sessions/{session_id}")
             if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "athletes":
@@ -243,7 +253,7 @@ def home_page(db: Database) -> str:
     <main class='home-grid'>
       <section class='card groups'><h2>Training Groups</h2><form method='post' action='/groups' class='inline-form'><label>Group name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Park City Football'></label><button>Create group</button></form>{group_items}</section>
       <section class='card sessions'><h2>Active sessions</h2>{session_items}<details class='completed-sessions'><summary>Completed session history</summary>{completed_items}</details></section>
-      <details class='card legacy'><summary>Standalone capture tools</summary><p class='muted'>Existing FEAT-001 workflows remain available for sessions without a Training Group.</p><h3>Athletes</h3><form method='post' action='/athletes' class='inline-form'><label>Name<input name='name' maxlength='100' required placeholder='Athlete name'></label><button>Add athlete</button></form><ul>{athlete_items}</ul><h3>New standalone session</h3><form method='post' action='/sessions' class='session-form'><label>Distance<input name='distance' inputmode='decimal' required value='10'></label><label>Unit<select name='unit'><option value='yards'>yards</option><option value='meters'>meters</option></select></label><button>Start capture</button></form></details>
+      <details class='card legacy'><summary>Standalone capture tools</summary><p class='muted'>Existing FEAT-001 workflows remain available for sessions without a Training Group.</p><h3>Athletes</h3><form method='post' action='/athletes' class='inline-form'><label>Name<input name='name' maxlength='100' required placeholder='Athlete name'></label><button>Add athlete</button></form><ul>{athlete_items}</ul><h3>New standalone session</h3>{session_form('/sessions')} </details>
     </main>"""
     return page("Sprint capture", body)
 
@@ -324,7 +334,7 @@ def group_page(db: Database, group_id: int) -> str:
     <header><a href='/'>← Training Groups</a><p class='eyebrow'>Recurring Training Group</p><h1>{html.escape(group['name'])}</h1><p>{len(roster)} athletes in persistent training order.</p></header>
     <main class='home-grid'>
       <section class='card'><h2>Persistent roster</h2><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
-      <section class='card'><h2>Start a session</h2><form method='post' action='/groups/{group_id}/sessions' class='session-form'><label>Distance<input name='distance' inputmode='decimal' required value='10'></label><label>Unit<select name='unit'><option value='yards'>yards</option><option value='meters'>meters</option></select></label><button {disabled}>Start with this roster</button></form>{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
+      <section class='card'><h2>Start a session</h2>{session_form(f'/groups/{group_id}/sessions', disabled)}{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
       <section class='card sessions'><h2>Active sessions</h2>{active}<details class='completed-sessions'><summary>Completed session history</summary>{completed}</details><h3>Historical data</h3><p><a class='button-link' href='/groups/{group_id}/imports/new'>Import historical sprint CSV</a></p><h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
     </main>"""
     return page(group["name"], body)
@@ -332,7 +342,28 @@ def group_page(db: Database, group_id: int) -> str:
 
 def session_label(session: dict, group_name: str | None = None) -> str:
     owner = group_name or session.get("group_name") or "Standalone"
-    return f"{owner} · {session['session_date']} · {session['distance']} {session['unit']}"
+    test = (f"{session['distance']} {session['unit']} · 10-yard fly"
+            if session.get("protocol_key") == "flying_10_acceleration_5yd_run_in"
+            else f"{session['distance']} {session['unit']} · protocol unspecified")
+    return f"{owner} · {session['session_date']} · {test}"
+
+
+def session_form(action: str, disabled: str = "") -> str:
+    return f"""<form method='post' action='{action}' class='session-form'>
+      <label>Test protocol<select name='protocol_key' required>
+        <option value='flying_10_acceleration_5yd_run_in'>10-yard fly</option>
+        <option value='unspecified'>Other / protocol not yet documented</option>
+      </select></label>
+      <label>Timed distance<input name='distance' inputmode='decimal' required value='10'></label>
+      <label>Unit<select name='unit'><option value='yards'>yards</option><option value='meters'>meters</option></select></label>
+      <label>Planned attempts<select name='target_attempts'><option value='4'>4 (ideal)</option><option value='2'>2</option></select></label>
+      <label>Surface<select name='surface_type' required><option value='turf'>Turf</option><option value='track'>Track</option><option value='court'>Court</option><option value='grass'>Grass</option><option value='other'>Other</option></select></label>
+      <label>Timing method<select name='timing_method' required><option value='timing-gates'>Timing gates</option><option value='laser'>Laser</option><option value='video'>Video</option><option value='hand-timed'>Hand-timed</option><option value='other'>Other</option></select></label>
+      <label>Environment<select name='environment' required><option value='indoor'>Indoor</option><option value='outdoor'>Outdoor</option></select></label>
+      <label>Notes (optional)<input name='protocol_notes' maxlength='1000' placeholder='Footwear, weather, setup differences'></label>
+      <button {disabled}>Start capture</button>
+      <p class='muted'>10-yard fly: two-point set, 5-yard untimed run-in, timed from 5–15 yards; acceleration test. Legacy name: 10-yard sprint.</p>
+    </form>"""
 
 
 def session_link(session: dict, group_name: str | None = None) -> str:
@@ -361,6 +392,10 @@ def import_upload_page(db: Database, group_id: int) -> str:
       <label>CSV file<input type='file' name='csv_file' accept='.csv,text/csv' required></label>
       <label>Distance<input name='distance' inputmode='decimal' required></label>
       <label>Unit<select name='unit' required><option value='yards'>yards</option><option value='meters'>meters</option></select></label>
+      <label>Surface<select name='surface_type' required><option value='turf'>Turf</option><option value='track'>Track</option><option value='court'>Court</option><option value='grass'>Grass</option><option value='other'>Other</option></select></label>
+      <label>Timing method<select name='timing_method' required><option value='timing-gates'>Timing gates</option><option value='laser'>Laser</option><option value='video'>Video</option><option value='hand-timed'>Hand-timed</option><option value='other'>Other</option></select></label>
+      <label>Environment<select name='environment' required><option value='indoor'>Indoor</option><option value='outdoor'>Outdoor</option></select></label>
+      <label>Notes (optional)<input name='protocol_notes' maxlength='1000'></label>
       <label>Year for month/day headers (optional)<input name='year' inputmode='numeric' pattern='[0-9]{{4}}'></label>
       <button>Preview import</button>
     </form></section></main>"""
@@ -472,7 +507,7 @@ def session_page(db: Database, session_id: int) -> str:
       <form method='post' action='/sessions/{session_id}/delete' onsubmit=\"return confirm('Permanently delete this session and all of its sprint attempts?')\"><button class='danger-button'>Delete session</button></form>
     </div>"""
     body = f"""
-    <header class='capture-header'><a href='{back_link}'>← Sessions</a><p class='capture-context'>{html.escape(session_label(session, group['name'] if group else None))} · {'Completed session' if completed else 'Live'}</p></header>
+    <header class='capture-header'><a href='{back_link}'>← Sessions</a><p class='capture-context'>{html.escape(session_label(session, group['name'] if group else None))} · {'Completed session' if completed else 'Live'}</p><p class='muted'>{html.escape(session_conditions(session))}</p></header>
     <main class='capture-layout'>
       <section class='capture-card'>
         {status_notice}{empty}<form id='capture-form' data-session='{session_id}' data-completed='{'true' if completed else 'false'}'>
@@ -493,6 +528,15 @@ def session_page(db: Database, session_id: int) -> str:
     return page(f"{session['distance']} {session['unit']} capture", body, show_nav=False)
 
 
+def session_conditions(session: dict) -> str:
+    values = [session.get("surface_type") or "surface unspecified",
+              session.get("timing_method") or "timing unspecified",
+              session.get("environment") or "environment unspecified"]
+    if session.get("protocol_notes"):
+        values.append(session["protocol_notes"])
+    return " · ".join(values)
+
+
 def athlete_summary(db: Database, session_id: int, athlete_id: int, saved_attempt_id: int | None = None) -> dict:
     session = db.session(session_id)
     if not session:
@@ -504,6 +548,9 @@ def athlete_summary(db: Database, session_id: int, athlete_id: int, saved_attemp
     comparable = [
         a for a in all_attempts
         if a["athlete_id"] == athlete_id and a["distance"] == session["distance"] and a["unit"] == session["unit"]
+        and a.get("protocol_key") == session.get("protocol_key")
+        and a.get("surface_type") == session.get("surface_type")
+        and a.get("timing_method") == session.get("timing_method")
     ]
     session_attempts = [a for a in comparable if a["session_id"] == session_id]
     prior_sessions = {}
@@ -646,6 +693,22 @@ def resource_id(value, resource: str) -> int:
 
 def optional_resource_id(value, resource: str) -> int | None:
     return None if value is None or str(value).strip() == "" else resource_id(value, resource)
+
+
+def selected_protocol(value: str | None) -> str | None:
+    return None if value in (None, "", "unspecified") else value
+
+
+def optional_attempt_count(value: str | None) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Typical attempt count must be 2 or 4.") from None
+    if count not in {2, 4}:
+        raise ValueError("Typical attempt count must be 2 or 4.")
+    return count
 
 
 def first_value(query: dict[str, list[str]], key: str) -> str | None:

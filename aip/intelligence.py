@@ -212,13 +212,13 @@ def seed_rigby_case_study(connection: sqlite3.Connection) -> str | None:
             evidence_definitions.append(
                 (f"sprint_session_{session_id}", "sprint_session", "sprint_capture",
                  "sprint_capture_session", str(session_id), observed_date,
-                 "Verified 10-yard sprint session containing Rigby's results.", None)
+                 "Verified 10-yard fly session (legacy label: 10-yard sprint) containing Rigby's results.", None)
             )
             for attempt in attempts:
                 evidence_definitions.append(
                     (f"sprint_result_{attempt['id']}", "sprint_result", "sprint_capture",
                      "sprint_attempt", str(attempt["id"]), observed_date,
-                     "Verified 10-yard sprint result; raw value remains in Sprint Capture.", None)
+                     "Verified 10-yard fly result; raw value remains in Sprint Capture.", None)
                 )
     for key, evidence_type, system, entity, record_id, observed_date, summary, metadata in evidence_definitions:
         evidence_id = new_id()

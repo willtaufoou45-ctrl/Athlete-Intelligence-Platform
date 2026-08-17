@@ -24,6 +24,47 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(reopened.all_athletes()[0]["name"], "Jordan")
         self.assertEqual(reopened.all_attempts()[0]["elapsed_ms"], 1720)
 
+    def test_flying_10_session_preserves_protocol_and_planned_attempt_count(self):
+        session_id = self.db.add_session(
+            "10", "yards", "flying_10_acceleration_5yd_run_in", target_attempts=4,
+            surface_type="turf", timing_method="timing-gates", environment="indoor",
+            protocol_notes="Cleats",
+        )
+        session = self.db.session(session_id)
+        self.assertEqual(session["protocol_name"], "Flying 10-yard acceleration test with a 5-yard run-in")
+        self.assertEqual(session["protocol_alias"], "10-yard sprint")
+        self.assertEqual(
+            (session["total_distance"], session["timed_distance"], session["run_in_distance"]),
+            ("15", "10", "5"),
+        )
+        self.assertEqual((session["timed_segment"], session["start_type"], session["purpose"]),
+                         ("5–15 yards", "two-point", "acceleration"))
+        self.assertEqual(session["target_attempts"], 4)
+        self.assertEqual(
+            (session["surface_type"], session["timing_method"], session["environment"], session["protocol_notes"]),
+            ("turf", "timing-gates", "indoor", "Cleats"),
+        )
+
+    def test_surface_and_timing_method_separate_comparison_sets(self):
+        turf = self.db.add_session("10", "yards", surface_type="turf", timing_method="timing-gates")
+        track = self.db.add_session("10", "yards", surface_type="track", timing_method="timing-gates")
+        hand_timed = self.db.add_session("10", "yards", surface_type="turf", timing_method="hand-timed")
+        for session_id, elapsed_ms in ((turf, 1800), (track, 1750), (hand_timed, 1700)):
+            self.db.add_attempt(session_id, self.athlete_id, elapsed_ms)
+        self.assertEqual([row["status"] for row in classify_attempts(self.db.all_attempts())],
+                         ["baseline", "baseline", "baseline"])
+
+    def test_unknown_protocol_is_not_silently_comparable_with_flying_10(self):
+        known = self.db.add_session("10", "yards", "flying_10_acceleration_5yd_run_in")
+        unknown = self.db.add_session("10", "yards", None)
+        self.db.add_attempt(known, self.athlete_id, 1800)
+        self.db.add_attempt(unknown, self.athlete_id, 1700)
+        self.assertEqual([row["status"] for row in classify_attempts(self.db.all_attempts())],
+                         ["baseline", "baseline"])
+        reopened = Database(self.path)
+        reopened.initialize()
+        self.assertTrue(reopened.session(unknown)["protocol_key"].startswith("unspecified-session:"))
+
     def test_edit_and_delete_recalculate_derived_status(self):
         first = self.db.add_attempt(self.session_id, self.athlete_id, 1800)
         second = self.db.add_attempt(self.session_id, self.athlete_id, 1750)

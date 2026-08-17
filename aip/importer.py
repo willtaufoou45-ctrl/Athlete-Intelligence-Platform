@@ -9,7 +9,7 @@ import json
 import re
 from datetime import date, datetime, timedelta
 
-from .database import Database, normalized_name
+from .database import Database, normalized_name, validated_choice
 from .domain import normalize_distance, seconds_to_milliseconds
 
 
@@ -95,6 +95,10 @@ def build_preview(
     distance: str,
     unit: str,
     year: int | None = None,
+    surface_type: str | None = None,
+    timing_method: str | None = None,
+    environment: str | None = None,
+    protocol_notes: str | None = None,
 ) -> dict:
     """Parse and validate an import without writing persisted sprint data."""
     group = database.group(group_id)
@@ -103,6 +107,12 @@ def build_preview(
     distance = normalize_distance(distance)
     if unit not in {"yards", "meters"}:
         raise ValueError("Unit must be yards or meters.")
+    surface_type = validated_choice(surface_type, "Surface type", {"turf", "track", "court", "grass", "other"})
+    timing_method = validated_choice(timing_method, "Timing method", {"timing-gates", "laser", "video", "hand-timed", "other"})
+    environment = validated_choice(environment, "Environment", {"indoor", "outdoor"})
+    protocol_notes = (protocol_notes or "").strip() or None
+    if protocol_notes and len(protocol_notes) > 1000:
+        raise ValueError("Protocol notes must be 1,000 characters or fewer.")
     if year is not None and not 1900 <= year <= 2100:
         raise ValueError("Year must be between 1900 and 2100.")
     rows = _csv_rows(payload)
@@ -210,6 +220,8 @@ def build_preview(
     return {
         "payload": payload, "filename": filename, "digest": hashlib.sha256(payload).hexdigest(),
         "group_id": group_id, "group_name": group["name"], "distance": distance, "unit": unit, "year": year,
+        "surface_type": surface_type, "timing_method": timing_method,
+        "environment": environment, "protocol_notes": protocol_notes,
         "header_row": header_row + 1, "first_column": first_column + 1, "last_column": last_column + 1,
         "date_columns": date_columns, "skipped_columns": skipped_columns, "athletes": athletes,
         "results": results, "issues": issues, "conflicts": conflicts, "identical_batch_id": identical["id"] if identical else None,
@@ -245,7 +257,9 @@ def confirm_import(database: Database, preview: dict, resolutions: dict[int, str
                    fail_after_attempts: int | None = None) -> dict:
     """Revalidate and persist one reviewed preview in a single transaction."""
     current = build_preview(database, preview["payload"], preview["filename"], preview["group_id"],
-                            preview["distance"], preview["unit"], preview["year"])
+                            preview["distance"], preview["unit"], preview["year"],
+                            preview.get("surface_type"), preview.get("timing_method"),
+                            preview.get("environment"), preview.get("protocol_notes"))
     if current["identical_batch_id"]:
         raise ValueError(f"This identical file was already imported as batch {current['identical_batch_id']}.")
     if _review_state(current) != _review_state(preview):
@@ -344,9 +358,14 @@ def confirm_import(database: Database, preview: dict, resolutions: dict[int, str
                 sessions_reused.append(session_id)
             elif resolution == "separate":
                 session_id = connection.execute(
-                    """INSERT INTO sprint_capture_sessions(distance,unit,session_date,created_at)
-                       VALUES (?,?,?,?)""",
-                    (current["distance"], current["unit"], source_date, f"{source_date} 12:00:00"),
+                    """INSERT INTO sprint_capture_sessions(
+                           distance,unit,session_date,created_at,protocol_key,protocol_name,
+                           surface_type,timing_method,environment,protocol_notes
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (current["distance"], current["unit"], source_date, f"{source_date} 12:00:00",
+                     f"unverified-import-batch:{batch_id}", "Imported protocol (identity retained; details unverified)",
+                     current.get("surface_type"), current.get("timing_method"), current.get("environment"),
+                     current.get("protocol_notes")),
                 ).lastrowid
                 connection.execute("INSERT INTO training_group_sessions(group_id,session_id) VALUES (?,?)",
                                    (current["group_id"], session_id))

@@ -40,7 +40,10 @@ class SprintExportTests(unittest.TestCase):
 
     def test_current_session_export_has_headers_encoding_filename_and_derived_values(self):
         athlete = self.app.database.add_athlete("Avery")
-        session = self.app.database.add_session("10", "yards")
+        session = self.app.database.add_session(
+            "10", "yards", surface_type="turf", timing_method="timing-gates",
+            environment="indoor", protocol_notes="Cleats",
+        )
         first = self.app.database.add_attempt(session, athlete, 1800)
         second = self.app.database.add_attempt(session, athlete, 1750)
         with self.app.database.connect() as connection:
@@ -63,6 +66,13 @@ class SprintExportTests(unittest.TestCase):
         self.assertEqual([row["Performance status"] for row in rows], ["baseline", "PR"])
         self.assertEqual([row["Session best"] for row in rows], ["1.75", "1.75"])
         self.assertEqual(rows[0]["Attempt time in milliseconds"], "1800")
+        self.assertEqual(rows[0]["Protocol"], "Flying 10-yard acceleration test with a 5-yard run-in")
+        self.assertEqual(rows[0]["Legacy protocol alias"], "10-yard sprint")
+        self.assertEqual(rows[0]["Timed segment"], "5–15 yards")
+        self.assertEqual(
+            (rows[0]["Surface type"], rows[0]["Timing method"], rows[0]["Environment"], rows[0]["Protocol notes"]),
+            ("turf", "timing-gates", "indoor", "Cleats"),
+        )
 
     def test_group_export_covers_multiple_athletes_sessions_and_units_in_snapshot_order(self):
         group = self.app.database.add_group("Sprint Group")

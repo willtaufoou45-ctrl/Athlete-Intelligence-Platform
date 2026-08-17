@@ -40,6 +40,27 @@ A `SprintCaptureSession` is a measurement context. It is not a complete training
 session or training block and must not displace the product's training-block
 model.
 
+### Sprint protocol identity
+
+The coach-facing name for the established test is **10-yard fly**. Its full
+protocol name is **Flying 10-yard acceleration test with a 5-yard run-in**:
+a two-point set start, 5-yard untimed run-in, and a timed 5–15-yard segment.
+It measures acceleration over that segment, not stationary-start 0–10-yard
+performance or pure maximal velocity. **10-yard sprint** remains a legacy alias.
+
+The session retains protocol identity with every result: 15-yard total distance,
+10-yard timed distance, 5-yard run-in, 5–15-yard timed segment, two-point start,
+and acceleration purpose. Unknown protocols remain explicitly unspecified and
+are not silently compared with the 10-yard fly. A three-point start used for
+40-yard preparation is a separate protocol. Sessions also retain the planned
+attempt count (typically four, or two when group size requires it); recorded
+attempts and their elapsed times are unchanged.
+
+Each session also records surface type, timing method, indoor/outdoor
+environment, and optional setup notes. Baseline and PR comparisons require the
+same protocol, surface type, and timing method. Environment and notes remain
+visible comparison context without changing the recorded elapsed time.
+
 ## Measurement rules
 
 - Each `SprintCaptureSession` has exactly one fixed distance and unit.
