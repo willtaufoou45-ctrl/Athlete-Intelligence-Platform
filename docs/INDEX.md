@@ -48,6 +48,10 @@ documented** are intentional gaps, not missing links.
 - Field Notes
   - [June 30, 2026](research/FIELD_NOTES/2026-06-30.md)
 
+# Validation
+
+- [AIP Field Validation Protocol](validation/FIELD_VALIDATION.md)
+
 # Workflows
 
 - Practice — **Not yet documented**; see [Practice OS](product/PRACTICE_OS.md)
