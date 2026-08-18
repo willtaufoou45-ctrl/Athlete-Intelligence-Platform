@@ -511,6 +511,22 @@ class Database:
         with self.connect() as connection:
             return [dict(row) for row in connection.execute("SELECT * FROM athletes ORDER BY name COLLATE NOCASE, id")]
 
+    def athlete_directory(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT a.id, a.name, g.id AS group_id, g.name AS group_name
+                   FROM athletes a
+                   LEFT JOIN training_group_members m ON m.athlete_id=a.id
+                   LEFT JOIN training_groups g ON g.id=m.group_id
+                   ORDER BY a.name COLLATE NOCASE, a.id, g.name COLLATE NOCASE, g.id"""
+            )
+            athletes: dict[int, dict] = {}
+            for row in rows:
+                athlete = athletes.setdefault(row["id"], {"id": row["id"], "name": row["name"], "groups": []})
+                if row["group_id"] is not None:
+                    athlete["groups"].append({"id": row["group_id"], "name": row["group_name"]})
+            return list(athletes.values())
+
     def athlete(self, athlete_id: int) -> dict | None:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM athletes WHERE id=?", (athlete_id,)).fetchone()
@@ -562,6 +578,35 @@ class Database:
                 (group_id, athlete_id, position),
             )
             return athlete_id
+
+    def create_group_athlete(self, group_id: int, name: str) -> int:
+        name = normalized_name(name, "Athlete")
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM athletes WHERE lower(name)=lower(?) ORDER BY id LIMIT 1", (name,)
+            ).fetchone()
+            if existing:
+                raise ValueError("An athlete with this name already exists. Search for and add the existing athlete instead.")
+        return self.add_group_athlete(group_id, name)
+
+    def add_existing_group_athlete(self, group_id: int, athlete_id: int) -> None:
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM training_groups WHERE id=?", (group_id,)).fetchone():
+                raise LookupError("Training Group not found.")
+            if not connection.execute("SELECT 1 FROM athletes WHERE id=?", (athlete_id,)).fetchone():
+                raise LookupError("Athlete not found.")
+            if connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (group_id, athlete_id),
+            ).fetchone():
+                raise ValueError("This athlete is already in this Training Group.")
+            position = connection.execute(
+                "SELECT COALESCE(MAX(position),0)+1 FROM training_group_members WHERE group_id=?", (group_id,)
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
+                (group_id, athlete_id, position),
+            )
 
     def reorder_group_athlete(self, group_id: int, athlete_id: int, direction: str) -> None:
         if direction not in {"up", "down"}:

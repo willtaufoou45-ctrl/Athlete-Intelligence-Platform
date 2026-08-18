@@ -255,6 +255,35 @@ class WebTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in self.app.database.group_roster(source)], [first])
         self.assertEqual([a["id"] for a in self.app.database.group_roster(target)], [second])
 
+    def test_group_page_searches_and_adds_existing_athlete_without_duplicate(self):
+        source = self.app.database.add_group("Source Group")
+        target = self.app.database.add_group("Target Group")
+        athlete_id = self.app.database.add_group_athlete(source, "Jordan Lee")
+
+        page = self.call("GET", f"/groups/{target}")["body"].decode()
+        self.assertIn("Find an existing athlete", page)
+        self.assertIn("Jordan Lee", page)
+        self.assertIn("Source Group", page)
+        self.assertIn("includes(query)", page)
+
+        response = self.call(
+            "POST", f"/groups/{target}/athletes/existing", {"athlete_id": athlete_id}, form=True
+        )
+        self.assertEqual(response["status"], "303 See Other")
+        self.assertEqual([a["id"] for a in self.app.database.group_roster(target)], [athlete_id])
+        self.assertEqual(len(self.app.database.all_athletes()), 2)
+
+    def test_group_page_blocks_accidental_exact_name_duplicate(self):
+        source = self.app.database.add_group("Source Group")
+        target = self.app.database.add_group("Target Group")
+        self.app.database.add_group_athlete(source, "Jordan Lee")
+
+        response = self.call("POST", f"/groups/{target}/athletes", {"name": "jordan lee"}, form=True)
+
+        self.assertEqual(response["status"], "400 Bad Request")
+        self.assertIn(b"already exists", response["body"])
+        self.assertEqual(len([a for a in self.app.database.all_athletes() if a["name"].lower() == "jordan lee"]), 1)
+
     def test_earlier_capture_page_keeps_its_roster_after_group_changes(self):
         group_id = self.app.database.add_group("Snapshot Team")
         original_id = self.app.database.add_group_athlete(group_id, "Original Runner")

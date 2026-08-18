@@ -176,7 +176,13 @@ def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config
                 return respond(start_response, group_page(database, resource_id(parts[1], "Training Group")))
             if method == "POST" and len(parts) == 3 and parts[0] == "groups" and parts[2] == "athletes":
                 group_id = resource_id(parts[1], "Training Group")
-                database.add_group_athlete(group_id, form_data(environ).get("name", ""))
+                database.create_group_athlete(group_id, form_data(environ).get("name", ""))
+                return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["athletes", "existing"]:
+                group_id = resource_id(parts[1], "Training Group")
+                database.add_existing_group_athlete(
+                    group_id, resource_id(form_data(environ).get("athlete_id"), "athlete")
+                )
                 return redirect(start_response, f"/groups/{group_id}")
             if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["roster", "reorder"]:
                 group_id = resource_id(parts[1], "Training Group")
@@ -410,6 +416,9 @@ def group_page(db: Database, group_id: int) -> str:
     if not group:
         raise LookupError("Training Group not found.")
     roster = db.group_roster(group_id)
+    roster_ids = {athlete["id"] for athlete in roster}
+    available_athletes = [athlete for athlete in db.athlete_directory() if athlete["id"] not in roster_ids]
+    directory_json = json.dumps(available_athletes).replace("<", "\\u003c")
     target_groups = [item for item in db.all_groups() if item["id"] != group_id]
     target_options = "".join(
         f"<option value='{item['id']}'>{html.escape(item['name'])}</option>" for item in target_groups
@@ -426,10 +435,16 @@ def group_page(db: Database, group_id: int) -> str:
     body = f"""
     <header><a href='/'>← Training Groups</a><p class='eyebrow'>Recurring Training Group</p><h1>{html.escape(group['name'])}</h1><p>{len(roster)} athletes in persistent training order.</p></header>
     <main class='home-grid'>
-      <section class='card roster-card'><h2>Persistent roster</h2><p class='muted'>Changes apply to future sessions. Existing session rosters stay unchanged.</p><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
+      <section class='card roster-card'><h2>Persistent roster</h2><p class='muted'>Changes apply to future sessions. Existing session rosters stay unchanged.</p>
+        <div class='athlete-picker'><label>Find an existing athlete<input id='existing-athlete-search' maxlength='100' autocomplete='off' data-desktop-autofocus placeholder='Type part of a name'></label><p class='muted'>Matching athletes will appear as you type.</p><div id='existing-athlete-results' class='athlete-search-results' aria-live='polite'></div></div>
+        <details class='create-athlete'><summary>Create a new athlete</summary><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>New athlete name<input name='name' maxlength='100' required placeholder='Full athlete name'></label><button>Create and add</button></form><p class='muted'>Use this only when the athlete does not already exist.</p></details>
+        <ol class='roster'>{roster_items}</ol></section>
       <section class='card'><h2>Start a session</h2>{session_form(f'/groups/{group_id}/sessions', disabled)}{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
       <section class='card sessions'><h2>Active sessions</h2>{active}<details class='completed-sessions'><summary>Completed session history</summary>{completed}</details><h3>Historical data</h3><p><a class='button-link' href='/groups/{group_id}/imports/new'>Import historical sprint CSV</a></p><h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
-    </main>"""
+    </main><script>const athleteDirectory={directory_json};const athleteSearch=document.querySelector('#existing-athlete-search'),athleteResults=document.querySelector('#existing-athlete-results');
+      const escapeAthleteText=value=>String(value).replace(/[&<>'"]/g,character=>({{'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}}[character]));
+      function showAthleteMatches(){{const query=athleteSearch.value.trim().toLowerCase();if(!query){{athleteResults.innerHTML='';return;}}const matches=athleteDirectory.filter(item=>item.name.toLowerCase().includes(query)).slice(0,10);athleteResults.innerHTML=matches.map(item=>`<form method="post" action="/groups/{group_id}/athletes/existing" class="athlete-search-result"><input type="hidden" name="athlete_id" value="${{item.id}}"><span><strong>${{escapeAthleteText(item.name)}}</strong><small>${{item.groups.length?escapeAthleteText(item.groups.map(group=>group.name).join(' · ')):'Not currently in a group'}}</small></span><button>Add</button></form>`).join('')||(query.length<2?'<p class="muted">Type another letter to narrow the list.</p>':'<p class="muted">No existing athletes match. Create a new athlete below if needed.</p>');}}
+      athleteSearch.addEventListener('input',showAthleteMatches);</script>"""
     return page(group["name"], body)
 
 
@@ -959,4 +974,5 @@ STYLES = """
 .completed-sessions{margin-top:20px;border-top:1px solid #e6eae3;padding-top:16px}.completed-sessions summary,.add-session-athlete summary{font-weight:800;cursor:pointer}.session-entry{display:grid;grid-template-columns:1fr auto;align-items:center;border-top:1px solid #e6eae3}.session-entry .session-link{border:0}.session-entry form{margin:0}.text-danger{background:transparent;color:#8c2c24;border-color:#d7aaa6;padding:7px 10px}.header-actions,.session-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.session-actions form{margin:0}.danger-button{background:#fff;color:#8c2c24;border-color:#d7aaa6}.up-next{background:#eef3ec;border-radius:12px;padding:12px 16px}.up-next p{margin-bottom:5px}.up-next ol{list-style:none;margin:0;padding:0}.up-next li{display:flex;gap:10px;align-items:center;padding:5px 0}.up-next li span{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#fff;font-size:.75rem}.autosave-note{font-size:.85rem;color:#6d776e;margin:-8px 0 0}.add-session-athlete{border-top:1px solid #e6eae3;margin-top:18px;padding-top:16px}.add-session-athlete form{margin-top:12px}.add-session-athlete p{margin:8px 0 0;font-size:.85rem}@media(max-width:720px){.session-entry{grid-template-columns:1fr}.session-entry form{padding-bottom:12px}.header-actions{align-items:stretch;flex-direction:column}.header-actions>a,.header-actions form,.header-actions button{width:100%;text-align:center}.session-management .session-actions{flex-direction:column}.session-management .session-actions>a,.session-management .session-actions form,.session-management .session-actions button{width:100%}}
 a,button,summary{touch-action:manipulation}a:active,button:active,summary:active{opacity:.72}
 .roster-member{display:block!important;padding:14px 0!important}.roster-person{display:flex;align-items:center;gap:10px}.roster-actions{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin:10px 0 0 38px}.roster-actions form{display:flex;align-items:end;gap:6px;margin:0}.roster-actions button{padding:8px 10px}.roster-transfer label{font-size:.8rem}.roster-transfer select{padding:8px}@media(max-width:720px){.roster-actions{align-items:stretch;flex-direction:column;margin-left:0}.roster-actions form,.roster-transfer{display:flex;flex-wrap:wrap}.roster-transfer label{flex:1 1 100%}.roster-transfer select{width:100%}.roster-actions button{min-height:44px}}
+.athlete-picker{margin:18px 0}.athlete-picker>label{max-width:520px}.athlete-picker>p{font-size:.85rem;margin:6px 0}.athlete-search-results{display:grid;gap:7px;margin-top:10px}.athlete-search-result{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #dce2d8;border-radius:10px;padding:9px;background:#f7f8f5}.athlete-search-result span,.athlete-search-result small{display:block}.athlete-search-result small{color:#6d776e}.athlete-search-result button{padding:8px 14px}.create-athlete{border-top:1px solid #e6eae3;border-bottom:1px solid #e6eae3;padding:14px 0;margin-bottom:12px}.create-athlete summary{font-weight:800;cursor:pointer}.create-athlete form{margin-top:12px}.create-athlete p{font-size:.85rem;margin:7px 0 0}@media(max-width:720px){.athlete-search-result button{min-height:44px}.create-athlete .inline-form{align-items:stretch}}
 """
