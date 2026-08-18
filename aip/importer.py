@@ -193,11 +193,11 @@ def build_preview(
             non_imported = []
             for item in existing:
                 imported_count = connection.execute(
-                    """SELECT COUNT(*) FROM imported_results provenance
+                    """SELECT COUNT(*) AS imported_count FROM imported_results provenance
                        JOIN sprint_attempts attempt ON attempt.id=provenance.attempt_id
                        WHERE attempt.session_id=?""",
                     (item["id"],),
-                ).fetchone()[0]
+                ).fetchone()["imported_count"]
                 if item["attempt_count"] == 0 or imported_count != item["attempt_count"]:
                     non_imported.append(dict(item))
             if non_imported:
@@ -294,8 +294,8 @@ def confirm_import(database: Database, preview: dict, resolutions: dict[int, str
             if choice == "create":
                 name = normalized_name(athlete["name"], "Athlete")
                 athlete_id = connection.execute("INSERT INTO athletes(name) VALUES (?)", (name,)).lastrowid
-                position = connection.execute("SELECT COALESCE(MAX(position),0)+1 FROM training_group_members WHERE group_id=?",
-                                              (current["group_id"],)).fetchone()[0]
+                position = connection.execute("SELECT COALESCE(MAX(position),0)+1 AS next_position FROM training_group_members WHERE group_id=?",
+                                              (current["group_id"],)).fetchone()["next_position"]
                 connection.execute("INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
                                    (current["group_id"], athlete_id, position))
                 created_athletes.append(athlete_id)
@@ -304,8 +304,8 @@ def confirm_import(database: Database, preview: dict, resolutions: dict[int, str
                     raise ValueError(f"Athlete resolution for row {source_row} no longer exists.")
                 if not connection.execute("SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
                                           (current["group_id"], athlete_id)).fetchone():
-                    position = connection.execute("SELECT COALESCE(MAX(position),0)+1 FROM training_group_members WHERE group_id=?",
-                                                  (current["group_id"],)).fetchone()[0]
+                    position = connection.execute("SELECT COALESCE(MAX(position),0)+1 AS next_position FROM training_group_members WHERE group_id=?",
+                                                  (current["group_id"],)).fetchone()["next_position"]
                     connection.execute("INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
                                        (current["group_id"], athlete_id, position))
             resolved[source_row] = (choice, athlete_id)

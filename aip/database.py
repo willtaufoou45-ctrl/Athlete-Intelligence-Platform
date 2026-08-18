@@ -571,8 +571,8 @@ class Database:
                 raise LookupError("Training Group not found.")
             athlete_id = connection.execute("INSERT INTO athletes(name) VALUES (?)", (name,)).lastrowid
             position = connection.execute(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM training_group_members WHERE group_id=?", (group_id,)
-            ).fetchone()[0]
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM training_group_members WHERE group_id=?", (group_id,)
+            ).fetchone()["next_position"]
             connection.execute(
                 "INSERT INTO training_group_members(group_id, athlete_id, position) VALUES (?, ?, ?)",
                 (group_id, athlete_id, position),
@@ -601,8 +601,8 @@ class Database:
             ).fetchone():
                 raise ValueError("This athlete is already in this Training Group.")
             position = connection.execute(
-                "SELECT COALESCE(MAX(position),0)+1 FROM training_group_members WHERE group_id=?", (group_id,)
-            ).fetchone()[0]
+                "SELECT COALESCE(MAX(position),0)+1 AS next_position FROM training_group_members WHERE group_id=?", (group_id,)
+            ).fetchone()["next_position"]
             connection.execute(
                 "INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
                 (group_id, athlete_id, position),
@@ -643,9 +643,9 @@ class Database:
                 (target_group_id, athlete_id),
             ).fetchone():
                 position = connection.execute(
-                    "SELECT COALESCE(MAX(position),0)+1 FROM training_group_members WHERE group_id=?",
+                    "SELECT COALESCE(MAX(position),0)+1 AS next_position FROM training_group_members WHERE group_id=?",
                     (target_group_id,),
-                ).fetchone()[0]
+                ).fetchone()["next_position"]
                 connection.execute(
                     "INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
                     (target_group_id, athlete_id, position),
@@ -893,13 +893,13 @@ class Database:
                 raise ValueError("Add athletes to standalone sessions from the home page.")
             athlete_id = connection.execute("INSERT INTO athletes(name) VALUES (?)", (name,)).lastrowid
             group_position = connection.execute(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM training_group_members WHERE group_id=?",
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM training_group_members WHERE group_id=?",
                 (group["group_id"],),
-            ).fetchone()[0]
+            ).fetchone()["next_position"]
             session_position = connection.execute(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM session_roster_members WHERE session_id=?",
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM session_roster_members WHERE session_id=?",
                 (session_id,),
-            ).fetchone()[0]
+            ).fetchone()["next_position"]
             connection.execute(
                 "INSERT INTO training_group_members(group_id, athlete_id, position) VALUES (?, ?, ?)",
                 (group["group_id"], athlete_id, group_position),
