@@ -523,12 +523,10 @@ class Database:
 
     def all_groups(self) -> list[dict]:
         with self.connect() as connection:
-            query = """SELECT g.*, COUNT(DISTINCT m.athlete_id) AS athlete_count,
-                              COUNT(DISTINCT gs.session_id) AS session_count
-                       FROM training_groups g
-                       LEFT JOIN training_group_members m ON m.group_id=g.id
-                       LEFT JOIN training_group_sessions gs ON gs.group_id=g.id
-                       GROUP BY g.id ORDER BY g.name COLLATE NOCASE, g.id"""
+            query = """SELECT g.*,
+                              (SELECT COUNT(*) FROM training_group_members m WHERE m.group_id=g.id) AS athlete_count,
+                              (SELECT COUNT(*) FROM training_group_sessions gs WHERE gs.group_id=g.id) AS session_count
+                       FROM training_groups g ORDER BY g.name COLLATE NOCASE, g.id"""
             return [dict(row) for row in connection.execute(query)]
 
     def group(self, group_id: int) -> dict | None:
@@ -569,23 +567,22 @@ class Database:
         if not self.group(group_id):
             raise LookupError("Training Group not found.")
         with self.connect() as connection:
-            query = """SELECT s.*, COUNT(a.id) AS attempt_count
+            query = """SELECT s.*,
+                              (SELECT COUNT(*) FROM sprint_attempts a WHERE a.session_id=s.id) AS attempt_count
                        FROM training_group_sessions gs
                        JOIN sprint_capture_sessions s ON s.id=gs.session_id
-                       LEFT JOIN sprint_attempts a ON a.session_id=s.id
-                       WHERE gs.group_id=? GROUP BY s.id
+                       WHERE gs.group_id=?
                        ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END,
                                 s.session_date DESC, s.id DESC"""
             return [dict(row) for row in connection.execute(query, (group_id,))]
 
     def all_sessions(self) -> list[dict]:
         with self.connect() as connection:
-            query = """SELECT s.*, g.name AS group_name, COUNT(a.id) AS attempt_count
+            query = """SELECT s.*, g.name AS group_name,
+                              (SELECT COUNT(*) FROM sprint_attempts a WHERE a.session_id=s.id) AS attempt_count
                        FROM sprint_capture_sessions s
-                       LEFT JOIN sprint_attempts a ON a.session_id=s.id
                        LEFT JOIN training_group_sessions gs ON gs.session_id=s.id
                        LEFT JOIN training_groups g ON g.id=gs.group_id
-                       GROUP BY s.id
                        ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END,
                                 s.session_date DESC, s.id DESC"""
             return [dict(row) for row in connection.execute(query)]
