@@ -50,7 +50,7 @@ class Connection:
     def executescript(self, script: str):
         for statement in (part.strip() for part in script.split(";")):
             if statement:
-                self._connection.execute(postgres_query(statement))
+                self._connection.execute(statement)
 
 
 def connect(database_url: str):
