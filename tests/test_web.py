@@ -238,6 +238,23 @@ class WebTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in self.app.database.session_athletes(first_session)], [first, second])
         self.assertEqual([a["id"] for a in self.app.database.session_athletes(second_session)], [first, second])
 
+    def test_group_roster_management_routes_move_copy_reorder_and_remove(self):
+        source = self.app.database.add_group("Source Group")
+        target = self.app.database.add_group("Target Group")
+        first = self.app.database.add_group_athlete(source, "First Runner")
+        second = self.app.database.add_group_athlete(source, "Second Runner")
+        page = self.call("GET", f"/groups/{source}")["body"].decode()
+        self.assertIn("Add to both", page)
+        self.assertIn("Changes apply to future sessions", page)
+
+        self.call("POST", f"/groups/{source}/roster/reorder", {"athlete_id": second, "direction": "up"}, form=True)
+        self.call("POST", f"/groups/{source}/roster/transfer", {"athlete_id": first, "target_group_id": target, "action": "copy"}, form=True)
+        self.call("POST", f"/groups/{source}/roster/transfer", {"athlete_id": second, "target_group_id": target, "action": "move"}, form=True)
+        self.call("POST", f"/groups/{target}/roster/remove", {"athlete_id": first}, form=True)
+
+        self.assertEqual([a["id"] for a in self.app.database.group_roster(source)], [first])
+        self.assertEqual([a["id"] for a in self.app.database.group_roster(target)], [second])
+
     def test_earlier_capture_page_keeps_its_roster_after_group_changes(self):
         group_id = self.app.database.add_group("Snapshot Team")
         original_id = self.app.database.add_group_athlete(group_id, "Original Runner")

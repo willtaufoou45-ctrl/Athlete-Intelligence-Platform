@@ -145,6 +145,23 @@ class DatabaseTests(unittest.TestCase):
         )
         self.db.add_attempt(session_id, first_id, 1800)
 
+    def test_roster_can_reorder_copy_move_and_remove_without_changing_session_snapshot(self):
+        source = self.db.add_group("Source")
+        target = self.db.add_group("Target")
+        first = self.db.add_group_athlete(source, "First")
+        second = self.db.add_group_athlete(source, "Second")
+        session_id = self.db.add_group_session(source, "10", "yards")
+
+        self.db.reorder_group_athlete(source, second, "up")
+        self.assertEqual([a["id"] for a in self.db.group_roster(source)], [second, first])
+        self.db.transfer_group_athlete(source, first, target, move=False)
+        self.db.transfer_group_athlete(source, second, target, move=True)
+        self.assertEqual([a["id"] for a in self.db.group_roster(source)], [first])
+        self.assertEqual([a["id"] for a in self.db.group_roster(target)], [first, second])
+        self.db.remove_group_athlete(target, first)
+        self.assertEqual([a["id"] for a in self.db.group_roster(target)], [second])
+        self.assertEqual([a["id"] for a in self.db.session_roster(session_id)], [first, second])
+
     def test_late_athlete_is_added_to_active_session_and_future_group_roster_only(self):
         group_id = self.db.add_group("Late Athlete Group")
         original = self.db.add_group_athlete(group_id, "Original Runner")

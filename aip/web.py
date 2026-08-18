@@ -178,6 +178,30 @@ def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config
                 group_id = resource_id(parts[1], "Training Group")
                 database.add_group_athlete(group_id, form_data(environ).get("name", ""))
                 return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["roster", "reorder"]:
+                group_id = resource_id(parts[1], "Training Group")
+                data = form_data(environ)
+                database.reorder_group_athlete(
+                    group_id, resource_id(data.get("athlete_id"), "athlete"), data.get("direction", ""),
+                )
+                return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["roster", "transfer"]:
+                group_id = resource_id(parts[1], "Training Group")
+                data = form_data(environ)
+                action = data.get("action", "")
+                if action not in {"copy", "move"}:
+                    raise ValueError("Choose copy or move.")
+                database.transfer_group_athlete(
+                    group_id, resource_id(data.get("athlete_id"), "athlete"),
+                    resource_id(data.get("target_group_id"), "Training Group"), move=action == "move",
+                )
+                return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["roster", "remove"]:
+                group_id = resource_id(parts[1], "Training Group")
+                database.remove_group_athlete(
+                    group_id, resource_id(form_data(environ).get("athlete_id"), "athlete"),
+                )
+                return redirect(start_response, f"/groups/{group_id}")
             if method == "POST" and len(parts) == 3 and parts[0] == "groups" and parts[2] == "sessions":
                 group_id = resource_id(parts[1], "Training Group")
                 data = form_data(environ)
@@ -386,8 +410,12 @@ def group_page(db: Database, group_id: int) -> str:
     if not group:
         raise LookupError("Training Group not found.")
     roster = db.group_roster(group_id)
+    target_groups = [item for item in db.all_groups() if item["id"] != group_id]
+    target_options = "".join(
+        f"<option value='{item['id']}'>{html.escape(item['name'])}</option>" for item in target_groups
+    )
     roster_items = "".join(
-        f"<li><span class='position'>{athlete['position']}</span>{html.escape(athlete['name'])}</li>" for athlete in roster
+        roster_member_controls(group_id, athlete, target_options, bool(target_groups)) for athlete in roster
     ) or "<li class='muted'>No athletes yet.</li>"
     all_sessions = db.group_sessions(group_id)
     active_sessions = [session for session in all_sessions if session["status"] == "open"]
@@ -398,11 +426,26 @@ def group_page(db: Database, group_id: int) -> str:
     body = f"""
     <header><a href='/'>← Training Groups</a><p class='eyebrow'>Recurring Training Group</p><h1>{html.escape(group['name'])}</h1><p>{len(roster)} athletes in persistent training order.</p></header>
     <main class='home-grid'>
-      <section class='card'><h2>Persistent roster</h2><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
+      <section class='card roster-card'><h2>Persistent roster</h2><p class='muted'>Changes apply to future sessions. Existing session rosters stay unchanged.</p><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
       <section class='card'><h2>Start a session</h2>{session_form(f'/groups/{group_id}/sessions', disabled)}{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
       <section class='card sessions'><h2>Active sessions</h2>{active}<details class='completed-sessions'><summary>Completed session history</summary>{completed}</details><h3>Historical data</h3><p><a class='button-link' href='/groups/{group_id}/imports/new'>Import historical sprint CSV</a></p><h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
     </main>"""
     return page(group["name"], body)
+
+
+def roster_member_controls(group_id: int, athlete: dict, target_options: str, has_targets: bool) -> str:
+    athlete_id = athlete["id"]
+    transfer = f"""<form method='post' action='/groups/{group_id}/roster/transfer' class='roster-transfer'>
+      <input type='hidden' name='athlete_id' value='{athlete_id}'>
+      <label>Group<select name='target_group_id' required>{target_options}</select></label>
+      <button name='action' value='move'>Move</button><button name='action' value='copy'>Add to both</button>
+    </form>""" if has_targets else "<span class='muted'>Create another group to move this athlete.</span>"
+    return f"""<li class='roster-member'><div class='roster-person'><span class='position'>{athlete['position']}</span><strong>{html.escape(athlete['name'])}</strong></div>
+      <div class='roster-actions'><form method='post' action='/groups/{group_id}/roster/reorder'>
+        <input type='hidden' name='athlete_id' value='{athlete_id}'><button name='direction' value='up' aria-label='Move {html.escape(athlete['name'])} up'>↑</button><button name='direction' value='down' aria-label='Move {html.escape(athlete['name'])} down'>↓</button>
+      </form>{transfer}<form method='post' action='/groups/{group_id}/roster/remove' onsubmit="return confirm('Remove this athlete from future sessions in this group?')">
+        <input type='hidden' name='athlete_id' value='{athlete_id}'><button class='text-danger'>Remove</button>
+      </form></div></li>"""
 
 
 def session_label(session: dict, group_name: str | None = None) -> str:
@@ -915,4 +958,5 @@ STYLES = """
 .export-form{display:flex;align-items:end;gap:10px;margin-top:14px}.export-form label{flex:1}@media(max-width:720px){.export-form{align-items:stretch;flex-direction:column}}
 .completed-sessions{margin-top:20px;border-top:1px solid #e6eae3;padding-top:16px}.completed-sessions summary,.add-session-athlete summary{font-weight:800;cursor:pointer}.session-entry{display:grid;grid-template-columns:1fr auto;align-items:center;border-top:1px solid #e6eae3}.session-entry .session-link{border:0}.session-entry form{margin:0}.text-danger{background:transparent;color:#8c2c24;border-color:#d7aaa6;padding:7px 10px}.header-actions,.session-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.session-actions form{margin:0}.danger-button{background:#fff;color:#8c2c24;border-color:#d7aaa6}.up-next{background:#eef3ec;border-radius:12px;padding:12px 16px}.up-next p{margin-bottom:5px}.up-next ol{list-style:none;margin:0;padding:0}.up-next li{display:flex;gap:10px;align-items:center;padding:5px 0}.up-next li span{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#fff;font-size:.75rem}.autosave-note{font-size:.85rem;color:#6d776e;margin:-8px 0 0}.add-session-athlete{border-top:1px solid #e6eae3;margin-top:18px;padding-top:16px}.add-session-athlete form{margin-top:12px}.add-session-athlete p{margin:8px 0 0;font-size:.85rem}@media(max-width:720px){.session-entry{grid-template-columns:1fr}.session-entry form{padding-bottom:12px}.header-actions{align-items:stretch;flex-direction:column}.header-actions>a,.header-actions form,.header-actions button{width:100%;text-align:center}.session-management .session-actions{flex-direction:column}.session-management .session-actions>a,.session-management .session-actions form,.session-management .session-actions button{width:100%}}
 a,button,summary{touch-action:manipulation}a:active,button:active,summary:active{opacity:.72}
+.roster-member{display:block!important;padding:14px 0!important}.roster-person{display:flex;align-items:center;gap:10px}.roster-actions{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin:10px 0 0 38px}.roster-actions form{display:flex;align-items:end;gap:6px;margin:0}.roster-actions button{padding:8px 10px}.roster-transfer label{font-size:.8rem}.roster-transfer select{padding:8px}@media(max-width:720px){.roster-actions{align-items:stretch;flex-direction:column;margin-left:0}.roster-actions form,.roster-transfer{display:flex;flex-wrap:wrap}.roster-transfer label{flex:1 1 100%}.roster-transfer select{width:100%}.roster-actions button{min-height:44px}}
 """

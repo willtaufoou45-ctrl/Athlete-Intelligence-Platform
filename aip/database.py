@@ -563,6 +563,85 @@ class Database:
             )
             return athlete_id
 
+    def reorder_group_athlete(self, group_id: int, athlete_id: int, direction: str) -> None:
+        if direction not in {"up", "down"}:
+            raise ValueError("Choose up or down.")
+        with self.connect() as connection:
+            athlete_ids = [row["athlete_id"] for row in connection.execute(
+                "SELECT athlete_id FROM training_group_members WHERE group_id=? ORDER BY position",
+                (group_id,),
+            )]
+            if athlete_id not in athlete_ids:
+                raise LookupError("Athlete is not in this Training Group.")
+            current = athlete_ids.index(athlete_id)
+            target = current - 1 if direction == "up" else current + 1
+            if target < 0 or target >= len(athlete_ids):
+                return
+            athlete_ids[current], athlete_ids[target] = athlete_ids[target], athlete_ids[current]
+            self._set_group_order(connection, group_id, athlete_ids)
+
+    def transfer_group_athlete(
+        self, source_group_id: int, athlete_id: int, target_group_id: int, *, move: bool,
+    ) -> None:
+        if source_group_id == target_group_id:
+            raise ValueError("Choose a different Training Group.")
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (source_group_id, athlete_id),
+            ).fetchone():
+                raise LookupError("Athlete is not in this Training Group.")
+            if not connection.execute("SELECT 1 FROM training_groups WHERE id=?", (target_group_id,)).fetchone():
+                raise LookupError("Target Training Group not found.")
+            if not connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (target_group_id, athlete_id),
+            ).fetchone():
+                position = connection.execute(
+                    "SELECT COALESCE(MAX(position),0)+1 FROM training_group_members WHERE group_id=?",
+                    (target_group_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
+                    (target_group_id, athlete_id, position),
+                )
+            if move:
+                self._remove_group_member(connection, source_group_id, athlete_id)
+
+    def remove_group_athlete(self, group_id: int, athlete_id: int) -> None:
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (group_id, athlete_id),
+            ).fetchone():
+                raise LookupError("Athlete is not in this Training Group.")
+            self._remove_group_member(connection, group_id, athlete_id)
+
+    @staticmethod
+    def _remove_group_member(connection, group_id: int, athlete_id: int) -> None:
+        connection.execute(
+            "DELETE FROM training_group_members WHERE group_id=? AND athlete_id=?",
+            (group_id, athlete_id),
+        )
+        remaining = [row["athlete_id"] for row in connection.execute(
+            "SELECT athlete_id FROM training_group_members WHERE group_id=? ORDER BY position",
+            (group_id,),
+        )]
+        Database._set_group_order(connection, group_id, remaining)
+
+    @staticmethod
+    def _set_group_order(connection, group_id: int, athlete_ids: list[int]) -> None:
+        for temporary, athlete_id in enumerate(athlete_ids, 100001):
+            connection.execute(
+                "UPDATE training_group_members SET position=? WHERE group_id=? AND athlete_id=?",
+                (temporary, group_id, athlete_id),
+            )
+        for position, athlete_id in enumerate(athlete_ids, 1):
+            connection.execute(
+                "UPDATE training_group_members SET position=? WHERE group_id=? AND athlete_id=?",
+                (position, group_id, athlete_id),
+            )
+
     def group_sessions(self, group_id: int) -> list[dict]:
         if not self.group(group_id):
             raise LookupError("Training Group not found.")
