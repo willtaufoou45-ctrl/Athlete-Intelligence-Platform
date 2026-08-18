@@ -120,6 +120,32 @@ duplicate protection, and atomic confirmation.
 Canonical specification:
 [FEAT-004 — Historical Sprint Import](FEATURES/feat-004-Historical-Sprint-Import.md)
 
+# FEAT-005 — Hosted Mobile Sprint Capture
+
+## Status
+
+Architecture implementation started locally; not deployed. Vendor-account,
+real-data migration, backup, and cutover approvals remain open.
+
+## Problem
+
+The phone currently depends on Terminal running on the coach's laptop and a
+stable local network connection. That connection failed during field use and a
+second sprint session could not be captured in AIP.
+
+## Goal
+
+Provide a permanent authenticated HTTPS address backed by hosted persistent
+storage while preserving the current phone-first capture workflow, Training
+Groups, roster snapshots, attempt/PR semantics, historical CSV import, sprint
+CSV export, and prototype feedback.
+
+Hosted V1 requires internet. Offline capture and later synchronization are a
+separate future feature and are explicitly excluded.
+
+Canonical specification:
+[FEAT-005 — Hosted Mobile Sprint Capture](FEATURES/feat-005-Hosted-Mobile-Sprint-Capture.md)
+
 # FEAT-006 — Athlete Focus Memory
 
 ## Category
@@ -278,7 +304,7 @@ The goal is to preserve the reasoning behind coaching decisions so every session
 
 The platform becomes an extension of the coach's memory rather than another database to manage.
 
-# FEAT-005 — Athlete Queue
+# Future Idea — Athlete Queue
 
 ## Category
 
@@ -434,3 +460,7 @@ Questions.
 Future thoughts.
 
 Connections to other features.
+
+This placeholder previously used FEAT-005. That identifier is now assigned to
+the validated Hosted Mobile Sprint Capture feature. Athlete Queue remains an
+unnumbered future idea until it is defined and assigned a new feature ID.

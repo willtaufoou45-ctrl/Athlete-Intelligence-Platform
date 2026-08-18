@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: aip-sprint-capture
+    runtime: python
+    plan: free
+    buildCommand: pip install .
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 60 --bind 0.0.0.0:$PORT aip.production:application
+    healthCheckPath: /diagnostics/ping
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: AIP_HOSTED
+        value: "true"
+      - key: AIP_AUTH_ENABLED
+        value: "true"
+      - key: AIP_TRUST_PROXY
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: AIP_COACH_USERNAME
+        sync: false
+      - key: AIP_COACH_PASSWORD_HASH
+        sync: false
+      - key: AIP_SESSION_SECRET
+        generateValue: true

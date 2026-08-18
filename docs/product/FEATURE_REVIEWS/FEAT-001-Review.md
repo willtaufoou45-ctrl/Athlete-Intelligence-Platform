@@ -78,6 +78,19 @@ names that require an explicit preview and resolution step.
 
 ## Unexpected behavior
 
+### Local connectivity prevented capture
+
+The field workflow depended on the phone reaching a Python process running in
+Terminal on the coach's laptop over the local network. During field use, the
+phone lost that connection and the second sprint session could not be captured
+in AIP.
+
+This is not evidence that the phone-first capture interaction needs to be
+replaced. It is evidence that a laptop-hosted runtime is not a reliable field
+delivery model. A permanent hosted HTTPS address removes the laptop and local
+network dependency, but still requires internet access. Capturing without
+internet and synchronizing later is a separate offline feature.
+
 ## What coaches liked
 
 ## What slowed coaching down
@@ -137,6 +150,13 @@ Historical attempts must not be added to the current-session attempt list.
 
 ### Required Improvements
 
+Move the validated phone-first workflow to a permanent authenticated HTTPS
+address backed by a hosted persistent database. Preserve Training Groups,
+ordered rosters, session snapshots, attempt/PR semantics, historical import,
+export, and feedback. Migrate the complete local database with duplicate
+protection and relationship/count reconciliation, and prove backup restoration
+before field cutover.
+
 Allow coaches to export persisted sprint results from the current session or a
 selected Training Group as CSV. AIP should remain the source of truth so the
 same sprint data does not need to be recorded manually in another system.
@@ -159,3 +179,4 @@ completion, labeling, and deletion controls.
 - [WI-004 — Coach Attention](../../workflow_intelligence/WI-004-Coach-Attention.md)
 - [WI-005 — Data Capture](../../workflow_intelligence/WI-005-Data-Capture.md)
 - [FEAT-004 — Historical Sprint Import](../FEATURES/feat-004-Historical-Sprint-Import.md)
+- [FEAT-005 — Hosted Mobile Sprint Capture](../FEATURES/feat-005-Hosted-Mobile-Sprint-Capture.md)

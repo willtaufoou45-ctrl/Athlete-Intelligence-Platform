@@ -2,3 +2,7 @@
 __pycache__/
 *.py[cod]
 data/
+.env
+.venv/
+*.egg-info/
+aip-migration-source.sqlite3

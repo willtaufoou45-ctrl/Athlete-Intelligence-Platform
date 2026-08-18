@@ -24,6 +24,14 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(reopened.all_athletes()[0]["name"], "Jordan")
         self.assertEqual(reopened.all_attempts()[0]["elapsed_ms"], 1720)
 
+    def test_attempt_request_key_makes_an_identical_retry_idempotent(self):
+        first = self.db.add_attempt(self.session_id, self.athlete_id, 1720, "phone-request-1")
+        retry = self.db.add_attempt(self.session_id, self.athlete_id, 1720, "phone-request-1")
+        self.assertEqual(retry, first)
+        self.assertEqual(len(self.db.all_attempts()), 1)
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            self.db.add_attempt(self.session_id, self.athlete_id, 1710, "phone-request-1")
+
     def test_flying_10_session_preserves_protocol_and_planned_attempt_count(self):
         session_id = self.db.add_session(
             "10", "yards", "flying_10_acceleration_5yd_run_in", target_attempts=4,

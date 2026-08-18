@@ -53,6 +53,13 @@ session conflicts without database writes; then explicitly confirm one atomic
 import. Imported attempts retain source provenance and continue to use the
 existing chronological baseline/PR calculation semantics.
 
+FEAT-005 defines and begins the hosted-mobile architecture. Local development
+continues to use SQLite by default. Hosted mode accepts a PostgreSQL
+`DATABASE_URL`, requires a coach credential and signed session secret, runs
+behind HTTPS, and protects state-changing requests against CSRF. Deployment and
+real-data migration remain explicit operator actions; see the
+[Hosted Sprint Capture Operations](docs/operations/HOSTED_OPERATIONS.md) runbook.
+
 The prototype also includes a local feedback form for recording workflow
 friction, successful interactions, and desired features. Feedback is stored in
 the same local SQLite database as athletes, Training Groups, sessions, and
@@ -74,6 +81,21 @@ application by pressing `Control-C` in the terminal.
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v
 ```
+
+## Hosted configuration
+
+The dependency and Render pilot definitions are in `pyproject.toml` and
+`render.yaml`. Copy variable names from `.env.example`, but keep all real values
+in untracked local configuration or the hosting provider's secret store.
+
+Generate the coach password hash interactively:
+
+```bash
+python3 -m scripts.hash_coach_password
+```
+
+Do not deploy or migrate athlete data until the approvals and verification
+gates in the FEAT-005 specification and hosted operations runbook are complete.
 
 ## Local data and backups
 

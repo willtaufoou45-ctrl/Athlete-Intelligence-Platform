@@ -94,6 +94,14 @@ class WebTests(unittest.TestCase):
         second = self.call("POST", f"/api/sessions/{self.session_id}/attempts", {"athlete_id": self.athlete_id, "elapsed_seconds": "1.75"})
         self.assertEqual(json.loads(second["body"])["attempts"][0]["status"], "pr")
 
+    def test_save_endpoint_deduplicates_a_retried_request_identifier(self):
+        payload = {"athlete_id": self.athlete_id, "elapsed_seconds": "1.80", "request_id": "retry-1"}
+        first = self.call("POST", f"/api/sessions/{self.session_id}/attempts", payload)
+        retry = self.call("POST", f"/api/sessions/{self.session_id}/attempts", payload)
+        self.assertEqual(first["status"], "201 Created")
+        self.assertEqual(retry["status"], "201 Created")
+        self.assertEqual(len(self.app.database.all_attempts()), 1)
+
     def test_invalid_input_is_reported_without_saving(self):
         response = self.call("POST", f"/api/sessions/{self.session_id}/attempts", {"athlete_id": self.athlete_id, "elapsed_seconds": "fast"})
         self.assertEqual(response["status"], "400 Bad Request")

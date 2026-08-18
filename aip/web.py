@@ -3,24 +3,30 @@
 from __future__ import annotations
 
 import html
+import io
 import json
+import re
 import secrets
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time
 from urllib.parse import parse_qs
 
+from .auth import csrf_valid, expired_cookie, issue_session, read_session, session_cookie, verify_password
+from .config import Config
 from .database import Database
 from .domain import classify_attempts, format_seconds, normalize_distance, seconds_to_milliseconds
 from .export import export_filename, parse_export_dates, sprint_export_csv
 from .importer import build_preview, confirm_import
 
 
-def create_app(database_path: str | Path = "data/aip.sqlite3"):
-    database = Database(database_path)
+def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config | None = None):
+    config = config or Config.from_env(str(database_path))
+    database = Database(config.database_url)
     database.initialize()
     import_previews: dict[str, dict] = {}
+    login_failures: dict[str, list[float]] = {}
 
     def handle_request(environ, start_response):
         method = environ.get("REQUEST_METHOD", "GET")
@@ -29,6 +35,41 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
         try:
             if method == "GET" and path == "/diagnostics/ping":
                 return plain_text_response(start_response, "pong\n")
+            if config.auth_enabled and method == "GET" and path == "/login":
+                if environ.get("aip.session"):
+                    return redirect(start_response, "/")
+                return respond(start_response, login_page())
+            if config.auth_enabled and method == "POST" and path == "/login":
+                login_key = environ.get("REMOTE_ADDR") or "unknown"
+                cutoff = time() - 300
+                login_failures[login_key] = [item for item in login_failures.get(login_key, []) if item >= cutoff]
+                if len(login_failures[login_key]) >= 5:
+                    return respond(start_response, login_page("Try again in a few minutes."), "429 Too Many Requests")
+                data = form_data(environ)
+                valid = secrets.compare_digest(data.get("username", ""), config.coach_username or "")
+                valid = verify_password(data.get("password", ""), config.coach_password_hash or "") and valid
+                if not valid:
+                    login_failures[login_key].append(time())
+                    return respond(start_response, login_page("Invalid username or password."), "401 Unauthorized")
+                login_failures.pop(login_key, None)
+                token, _ = issue_session(config.coach_username or "coach", config.session_secret or "")
+                return redirect_with_cookie(
+                    start_response, "/", session_cookie(token, secure=request_is_secure(environ, config))
+                )
+            if config.auth_enabled and not environ.get("aip.session"):
+                if path.startswith("/api/"):
+                    return json_response(start_response, {"error": "Authentication required."}, "401 Unauthorized")
+                return redirect(start_response, "/login")
+            if config.auth_enabled and method == "POST" and path == "/logout":
+                return redirect_with_cookie(
+                    start_response, "/login", expired_cookie(secure=request_is_secure(environ, config))
+                )
+            if config.auth_enabled and method in {"POST", "PUT", "PATCH", "DELETE"}:
+                submitted = csrf_from_request(environ)
+                if not csrf_valid(environ, environ["aip.session"], submitted):
+                    if path.startswith("/api/"):
+                        return json_response(start_response, {"error": "Request verification failed."}, "403 Forbidden")
+                    return respond(start_response, page("Request expired", "<h1>Request expired</h1><p>Reload the page and try again.</p>"), "403 Forbidden")
             if method == "GET" and path == "/":
                 return respond(start_response, home_page(database))
             if method == "GET" and len(parts) == 3 and parts[:2] == ["internal", "intelligence"]:
@@ -171,7 +212,10 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 session_id = resource_id(parts[2], "session")
                 data = json_data(environ)
                 athlete_id = resource_id(data.get("athlete_id", ""), "athlete")
-                attempt_id = database.add_attempt(session_id, athlete_id, seconds_to_milliseconds(data.get("elapsed_seconds", "")))
+                attempt_id = database.add_attempt(
+                    session_id, athlete_id, seconds_to_milliseconds(data.get("elapsed_seconds", "")),
+                    data.get("request_id"),
+                )
                 return json_response(start_response, athlete_summary(database, session_id, athlete_id, attempt_id), "201 Created")
             if method == "POST" and len(parts) == 4 and parts[0:2] == ["api", "attempts"] and parts[3] == "edit":
                 attempt_id = resource_id(parts[2], "attempt")
@@ -203,6 +247,8 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/") or "/"
         client_ip = environ.get("REMOTE_ADDR") or "-"
+        if config.auth_enabled:
+            environ["aip.session"] = read_session(environ, config.session_secret or "")
         try:
             response = handle_request(environ, capture_response)
         except Exception:
@@ -217,8 +263,13 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
             if name.lower() != "server-timing"
         ]
         headers.append(("Server-Timing", f"app;dur={elapsed_ms:.3f}"))
+        headers.extend(security_headers(request_is_secure(environ, config)))
         if path == "/diagnostics/ping":
             headers.append(("Cache-Control", "no-store"))
+        if (config.auth_enabled and environ.get("aip.session") and isinstance(response, (list, tuple))
+                and any(name.lower() == "content-type" and value.startswith("text/html") for name, value in headers)):
+            response = [inject_csrf(b"".join(response), environ["aip.session"]["csrf"])]
+            headers = [(name, value) for name, value in headers if name.lower() != "content-length"]
         body_size = sum(len(chunk) for chunk in response) if isinstance(response, (list, tuple)) else 0
         if not any(name.lower() == "content-length" for name, _ in headers) and isinstance(response, (list, tuple)):
             headers.append(("Content-Length", str(body_size)))
@@ -232,7 +283,21 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
 
     app.database = database
     app.import_previews = import_previews
+    app.config = config
+    app.login_failures = login_failures
     return app
+
+
+def login_page(error: str = "") -> str:
+    message = f"<p class='error'>{html.escape(error)}</p>" if error else ""
+    body = f"""
+    <header><p class='eyebrow'>Athlete Intelligence Platform</p><h1>Coach sign in</h1></header>
+    <main class='capture-layout'><section class='card'>{message}<form method='post' action='/login'>
+      <label>Username<input name='username' autocomplete='username' required></label>
+      <label>Password<input type='password' name='password' autocomplete='current-password' required></label>
+      <button>Sign in</button>
+    </form></section></main>"""
+    return page("Coach sign in", body, show_nav=False)
 
 
 def home_page(db: Database) -> str:
@@ -751,12 +816,66 @@ def redirect(start_response, location: str):
     return [b""]
 
 
+def redirect_with_cookie(start_response, location: str, cookie: str):
+    start_response("303 See Other", [("Location", location), ("Set-Cookie", cookie), ("Content-Length", "0")])
+    return [b""]
+
+
+def request_is_secure(environ: dict, config: Config) -> bool:
+    if environ.get("wsgi.url_scheme") == "https":
+        return True
+    forwarded = environ.get("HTTP_X_FORWARDED_PROTO", "").split(",")[0].strip()
+    return bool(config.trusted_proxy and forwarded == "https")
+
+
+def security_headers(secure: bool) -> list[tuple[str, str]]:
+    headers = [
+        ("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        ("X-Frame-Options", "DENY"),
+    ]
+    if secure:
+        headers.append(("Strict-Transport-Security", "max-age=31536000; includeSubDomains"))
+    return headers
+
+
+def csrf_from_request(environ: dict) -> str | None:
+    header = environ.get("HTTP_X_CSRF_TOKEN")
+    if header:
+        return header
+    content_type = environ.get("CONTENT_TYPE", "")
+    length = int(environ.get("CONTENT_LENGTH") or 0)
+    payload = environ["wsgi.input"].read(length)
+    environ["wsgi.input"] = io.BytesIO(payload)
+    if content_type.startswith("application/x-www-form-urlencoded"):
+        return parse_qs(payload.decode()).get("csrf_token", [None])[0]
+    if content_type.startswith("multipart/form-data"):
+        try:
+            fields, _ = multipart_form(environ)
+            return fields.get("csrf_token")
+        finally:
+            environ["wsgi.input"] = io.BytesIO(payload)
+    return None
+
+
+def inject_csrf(payload: bytes, token: str) -> bytes:
+    content = payload.decode()
+    escaped = html.escape(token, quote=True)
+    content = content.replace("</head>", f"<meta name='csrf-token' content='{escaped}'></head>")
+    hidden = f"<input type='hidden' name='csrf_token' value='{escaped}'>"
+    content = re.sub(r"(<form\b[^>]*\bmethod=['\"]post['\"][^>]*>)", r"\1" + hidden, content, flags=re.I)
+    logout = f"<form method='post' action='/logout'>{hidden}<button>Sign out</button></form>"
+    content = content.replace("</nav>", logout + "</nav>", 1)
+    return content.encode()
+
+
 CAPTURE_SCRIPT = r"""
 const form=document.querySelector('#capture-form'), athlete=document.querySelector('#athlete'), athleteName=document.querySelector('#athlete-name'), athletePosition=document.querySelector('#athlete-position'), athleteSearch=document.querySelector('#athlete-search'), previousAthlete=document.querySelector('#previous-athlete'), nextAthlete=document.querySelector('#next-athlete'), upNextList=document.querySelector('#up-next-list'), elapsed=document.querySelector('#elapsed'), feedback=document.querySelector('#feedback'), results=document.querySelector('#results');
 const sessionId=form.dataset.session;
 const completed=form.dataset.completed==='true';
 const finePointer=window.matchMedia('(hover: hover) and (pointer: fine)').matches;
-let activeIndex=-1,saveTimer=null,saving=false;
+let activeIndex=-1,saveTimer=null,saving=false,pendingRequestId=null;
 const escapeHtml=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 function render(data){
   const allTime=data.all_time_best?`<strong>${escapeHtml(data.all_time_best.time)}s</strong><span>${escapeHtml(data.all_time_best.date)}</span>`:'<strong>—</strong><span>No comparable result</span>';
@@ -764,11 +883,11 @@ function render(data){
   const rows=data.attempts.map(a=>`<li class="attempt ${a.just_saved?'saved':''}"><div><strong>${escapeHtml(a.time)}s</strong> ${a.status==='baseline'?'<span class="badge baseline">Baseline</span>':a.status==='pr'?'<span class="badge pr">PR</span>':''}</div>${data.editable?`<div class="actions"><button type="button" onclick="editAttempt(${a.id}, '${escapeHtml(a.time)}')">Edit</button><button type="button" class="danger" onclick="deleteAttempt(${a.id})">Delete</button></div>`:''}</li>`).join('');
   results.innerHTML=`<div class="reference-grid"><div><p>All-time best</p>${allTime}</div><div><p>Previous session</p>${previous}</div></div><div class="current-results"><div class="result-heading"><p class="eyebrow">This session</p><div class="best"><span>Best</span><strong>${data.best?escapeHtml(data.best)+'s':'—'}</strong></div></div>${rows?`<ol class="attempts">${rows}</ol>`:'<p class="muted">No attempts yet.</p>'}</div>`;
 }
-async function request(url, body={}){const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not save.');return data;}
+async function request(url, body={}){const csrf=document.querySelector("meta[name='csrf-token']")?.content||'';const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not save.');return data;}
 async function loadAthlete(){if(!athlete.value){results.innerHTML='<p class="muted">Select an athlete to see their results.</p>';return;}const response=await fetch(`/api/sessions/${sessionId}/athletes/${athlete.value}`);const data=await response.json();if(response.ok)render(data);else feedback.textContent=data.error||'Could not load results.';}
 function renderUpNext(){const count=Math.min(3,Math.max(0,athletes.length-1));upNextList.innerHTML=Array.from({length:count},(_,offset)=>{const index=(activeIndex+offset+1)%athletes.length;return `<li><span>${index+1}</span><strong>${escapeHtml(athletes[index].name)}</strong></li>`;}).join('')||'<li class="muted">No other athletes queued.</li>';}
 async function setAthlete(index,focusTime=true){if(!athletes.length)return;activeIndex=(index+athletes.length)%athletes.length;const selected=athletes[activeIndex];athlete.value=selected.id;athleteName.textContent=selected.name;athletePosition.textContent=`Athlete ${activeIndex+1} of ${athletes.length}`;athleteSearch.value='';localStorage.setItem(`aip-session-${sessionId}-athlete`,selected.id);renderUpNext();await loadAthlete();if(focusTime&&!completed)elapsed.focus();}
-async function saveAttempt(){if(completed||saving||!elapsed.value.trim())return;clearTimeout(saveTimer);saving=true;feedback.textContent='Saving…';try{const data=await request(`/api/sessions/${sessionId}/attempts`,{athlete_id:athlete.value,elapsed_seconds:elapsed.value});render(data);elapsed.value='';feedback.textContent='Saved.';}catch(error){feedback.textContent=error.message;}finally{saving=false;if(!completed)elapsed.focus();}}
+async function saveAttempt(){if(completed||saving||!elapsed.value.trim())return;clearTimeout(saveTimer);saving=true;pendingRequestId=pendingRequestId||(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random()}`);feedback.textContent='Saving…';try{const data=await request(`/api/sessions/${sessionId}/attempts`,{athlete_id:athlete.value,elapsed_seconds:elapsed.value,request_id:pendingRequestId});render(data);elapsed.value='';pendingRequestId=null;feedback.textContent='Saved.';}catch(error){feedback.textContent=`Not confirmed — ${error.message} Retry with the time still entered.`;}finally{saving=false;if(!completed)elapsed.focus();}}
 previousAthlete.addEventListener('click',()=>setAthlete(activeIndex-1));
 nextAthlete.addEventListener('click',()=>setAthlete(activeIndex+1));
 athleteSearch.addEventListener('change',()=>{const typed=athleteSearch.value.trim().toLowerCase();const index=athletes.findIndex((item,i)=>`${i+1} · ${item.name}`.toLowerCase()===typed||item.name.toLowerCase()===typed);if(index>=0)setAthlete(index);else feedback.textContent='Choose an athlete from the roster.';});

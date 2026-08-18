@@ -22,6 +22,7 @@ from .intelligence import (
     seed_brody_case_study,
 )
 from .domain import FLYING_10_PROTOCOL
+from .postgres import connect as postgres_connect, postgres_schema
 
 
 SCHEMA = """
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS sprint_attempts (
     session_id INTEGER NOT NULL REFERENCES sprint_capture_sessions(id) ON DELETE CASCADE,
     athlete_id INTEGER NOT NULL REFERENCES athletes(id) ON DELETE RESTRICT,
     elapsed_ms INTEGER NOT NULL CHECK(elapsed_ms > 0),
+    request_key TEXT UNIQUE,
     captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -133,31 +135,66 @@ CREATE INDEX IF NOT EXISTS idx_import_batches_scope ON import_batches(group_id, 
 CREATE INDEX IF NOT EXISTS idx_imported_results_batch ON imported_results(batch_id, source_row, source_column);
 """
 
+MIGRATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS data_migrations (
+    id BIGSERIAL PRIMARY KEY,
+    migration_key TEXT NOT NULL UNIQUE,
+    source_sha256 TEXT NOT NULL,
+    source_manifest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running','complete','failed')),
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+"""
+
+POSTGRES_SCHEMA_VERSION = 2
+
 
 class Database:
     def __init__(self, path: str | Path):
         self.path = str(path)
+        self.is_postgres = self.path.startswith(("postgres://", "postgresql://"))
 
     @contextmanager
     def connect(self):
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
+        raw_connection = None
+        if self.is_postgres:
+            raw_connection, connection = postgres_connect(self.path)
+        else:
+            connection = sqlite3.connect(self.path)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
         try:
-            with connection:
+            with (raw_connection or connection):
                 yield connection
         finally:
-            connection.close()
+            (raw_connection or connection).close()
 
     def initialize(self) -> None:
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        if not self.is_postgres:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
-            connection.executescript(SCHEMA)
-            self._migrate_session_lifecycle(connection)
-            self._migrate_sprint_protocols(connection)
-            self._backfill_legacy_session_rosters(connection)
-            connection.executescript(INTELLIGENCE_SCHEMA)
-            self._migrate_intelligence_v02(connection)
+            if self.is_postgres:
+                connection.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("aip-schema-migrations",))
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+                )
+                applied = connection.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version=?", (POSTGRES_SCHEMA_VERSION,)
+                ).fetchone()
+                if not applied:
+                    connection.executescript(postgres_schema(SCHEMA, INTELLIGENCE_SCHEMA, MIGRATION_SCHEMA))
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version) VALUES (?)", (POSTGRES_SCHEMA_VERSION,)
+                    )
+            else:
+                connection.executescript(SCHEMA)
+                self._migrate_session_lifecycle(connection)
+                self._migrate_attempt_request_keys(connection)
+                self._migrate_sprint_protocols(connection)
+                self._backfill_legacy_session_rosters(connection)
+                connection.executescript(INTELLIGENCE_SCHEMA)
+                self._migrate_intelligence_v02(connection)
 
     def seed_rigby_intelligence(self) -> str | None:
         with self.connect() as connection:
@@ -422,6 +459,15 @@ class Database:
             )
         if "completed_at" not in columns:
             connection.execute("ALTER TABLE sprint_capture_sessions ADD COLUMN completed_at TEXT")
+
+    @staticmethod
+    def _migrate_attempt_request_keys(connection: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(sprint_attempts)")}
+        if "request_key" not in columns:
+            connection.execute("ALTER TABLE sprint_attempts ADD COLUMN request_key TEXT")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_request_key ON sprint_attempts(request_key)"
+        )
 
     @staticmethod
     def _migrate_sprint_protocols(connection: sqlite3.Connection) -> None:
@@ -779,8 +825,23 @@ class Database:
             connection.execute("DELETE FROM sprint_capture_sessions WHERE id=?", (session_id,))
             return group["group_id"] if group else None
 
-    def add_attempt(self, session_id: int, athlete_id: int, elapsed_ms: int) -> int:
+    def add_attempt(
+        self, session_id: int, athlete_id: int, elapsed_ms: int, request_key: str | None = None,
+    ) -> int:
+        if request_key is not None and (not request_key.strip() or len(request_key) > 100):
+            raise ValueError("Invalid attempt request identifier.")
         with self.connect() as connection:
+            if request_key:
+                existing = connection.execute(
+                    "SELECT id,session_id,athlete_id,elapsed_ms FROM sprint_attempts WHERE request_key=?",
+                    (request_key,),
+                ).fetchone()
+                if existing:
+                    if (existing["session_id"], existing["athlete_id"], existing["elapsed_ms"]) != (
+                        session_id, athlete_id, elapsed_ms,
+                    ):
+                        raise ValueError("Attempt request identifier conflicts with another save.")
+                    return existing["id"]
             session = connection.execute(
                 "SELECT status FROM sprint_capture_sessions WHERE id=?", (session_id,)
             ).fetchone()
@@ -798,6 +859,22 @@ class Database:
                 (session_id, athlete_id),
             ).fetchone():
                 raise ValueError("Choose an athlete from this session roster.")
+            if request_key:
+                cursor = connection.execute(
+                    "INSERT INTO sprint_attempts(session_id,athlete_id,elapsed_ms,request_key) VALUES (?,?,?,?) ON CONFLICT(request_key) DO NOTHING",
+                    (session_id, athlete_id, elapsed_ms, request_key),
+                )
+                if cursor.rowcount:
+                    return cursor.lastrowid
+                existing = connection.execute(
+                    "SELECT id,session_id,athlete_id,elapsed_ms FROM sprint_attempts WHERE request_key=?",
+                    (request_key,),
+                ).fetchone()
+                if existing and (existing["session_id"], existing["athlete_id"], existing["elapsed_ms"]) == (
+                    session_id, athlete_id, elapsed_ms,
+                ):
+                    return existing["id"]
+                raise ValueError("Attempt request identifier conflicts with another save.")
             return connection.execute(
                 "INSERT INTO sprint_attempts(session_id, athlete_id, elapsed_ms) VALUES (?, ?, ?)",
                 (session_id, athlete_id, elapsed_ms),
