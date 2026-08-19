@@ -342,6 +342,19 @@ class WebTests(unittest.TestCase):
         self.assertIn("Times save automatically", body)
         self.assertNotIn("id='save'", body)
 
+    def test_capture_time_input_automatically_places_decimal_after_first_digit(self):
+        group_id = self.app.database.add_group("Decimal Input Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+
+        body = self.call("GET", f"/sessions/{session_id}")["body"].decode()
+
+        self.assertIn("inputmode='numeric'", body)
+        self.assertIn("172 becomes 1.72", body)
+        self.assertIn("function formatSprintTime(value)", body)
+        self.assertIn("`${digits[0]}.${digits.slice(1)}`", body)
+        self.assertIn("/^\\d\\.\\d{1,3}$/", body)
+
     def test_capture_page_prioritizes_live_controls_before_session_management(self):
         group_id = self.app.database.add_group("Mobile Priority Group")
         self.app.database.add_group_athlete(group_id, "Runner")

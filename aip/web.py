@@ -636,8 +636,8 @@ def session_page(db: Database, session_id: int) -> str:
         {status_notice}{empty}<form id='capture-form' data-session='{session_id}' data-completed='{'true' if completed else 'false'}'>
           <div class='athlete-flow'><button type='button' id='previous-athlete' class='flow-button' aria-label='Previous athlete'>←</button><div class='active-athlete'><span id='athlete-position'>Athlete</span><strong id='athlete-name'>Choose athlete</strong></div><button type='button' id='next-athlete' class='flow-button' aria-label='Next athlete'>→</button></div>
           <input type='hidden' id='athlete' required>
-          <label>Time (seconds)<div class='time-row'><input id='elapsed' inputmode='decimal' autocomplete='off' placeholder='1.72' required {disabled}></div></label>
-          <p class='autosave-note'>{'Capture is closed.' if completed else 'Times save automatically after you finish typing. Press Enter to save immediately.'}</p>
+          <label>Time (seconds)<div class='time-row'><input id='elapsed' inputmode='numeric' autocomplete='off' placeholder='1.72' maxlength='5' required {disabled}></div></label>
+          <p class='autosave-note'>{'Capture is closed.' if completed else 'Type digits only—the decimal appears automatically (172 becomes 1.72). Times save automatically after you finish typing.'}</p>
           <div class='up-next'><p class='eyebrow'>Next three</p><ol id='up-next-list'></ol></div>
         </form><p id='feedback' role='status' aria-live='polite'></p>
         <div id='results'><p class='muted'>Select an athlete to see their results.</p></div>
@@ -949,7 +949,9 @@ async function saveAttempt(){if(completed||saving||!elapsed.value.trim())return;
 previousAthlete.addEventListener('click',()=>setAthlete(activeIndex-1));
 nextAthlete.addEventListener('click',()=>setAthlete(activeIndex+1));
 athleteSearch.addEventListener('change',()=>{const typed=athleteSearch.value.trim().toLowerCase();const index=athletes.findIndex((item,i)=>`${i+1} · ${item.name}`.toLowerCase()===typed||item.name.toLowerCase()===typed);if(index>=0)setAthlete(index);else feedback.textContent='Choose an athlete from the roster.';});
-elapsed.addEventListener('input',()=>{clearTimeout(saveTimer);feedback.textContent='';if(/^\d+\.\d{1,3}$/.test(elapsed.value.trim()))saveTimer=setTimeout(saveAttempt,900);});
+function formatSprintTime(value){const digits=value.replace(/\D/g,'').slice(0,4);return digits?`${digits[0]}.${digits.slice(1)}`:'';}
+elapsed.addEventListener('beforeinput',event=>{if(event.inputType==='deleteContentBackward'&&elapsed.selectionStart===elapsed.value.length&&elapsed.selectionEnd===elapsed.value.length&&/^\d\.$/.test(elapsed.value)){event.preventDefault();elapsed.value='';feedback.textContent='';}});
+elapsed.addEventListener('input',()=>{clearTimeout(saveTimer);feedback.textContent='';elapsed.value=formatSprintTime(elapsed.value);if(/^\d\.\d{1,3}$/.test(elapsed.value))saveTimer=setTimeout(saveAttempt,900);});
 form.addEventListener('submit',async event=>{event.preventDefault();await saveAttempt();});
 window.editAttempt=async(id,current)=>{const value=prompt('Correct time in seconds:',current);if(value===null)return;try{render(await request(`/api/attempts/${id}/edit`,{elapsed_seconds:value}));feedback.textContent='Attempt updated.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
 window.deleteAttempt=async id=>{if(!confirm('Delete this attempt?'))return;try{render(await request(`/api/attempts/${id}/delete`));feedback.textContent='Attempt deleted.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
