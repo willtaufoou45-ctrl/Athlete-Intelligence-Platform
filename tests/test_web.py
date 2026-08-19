@@ -246,6 +246,9 @@ class WebTests(unittest.TestCase):
         page = self.call("GET", f"/groups/{source}")["body"].decode()
         self.assertIn("Add to both", page)
         self.assertIn("Changes apply to future sessions", page)
+        self.assertIn("Current groups:</strong> Source Group", page)
+        self.assertIn("Choose another group", page)
+        self.assertNotIn("value='2' selected", page)
 
         self.call("POST", f"/groups/{source}/roster/reorder", {"athlete_id": second, "direction": "up"}, form=True)
         self.call("POST", f"/groups/{source}/roster/transfer", {"athlete_id": first, "target_group_id": target, "action": "copy"}, form=True)
@@ -272,6 +275,21 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response["status"], "303 See Other")
         self.assertEqual([a["id"] for a in self.app.database.group_roster(target)], [athlete_id])
         self.assertEqual(len(self.app.database.all_athletes()), 2)
+
+    def test_group_page_uses_collapsed_mobile_workflow_in_requested_order(self):
+        group_id = self.app.database.add_group("Workflow Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+
+        page = self.call("GET", f"/groups/{group_id}")["body"].decode()
+
+        create_at = page.index("Create a new athlete")
+        find_at = page.index("<summary>Find an existing athlete</summary>")
+        start_at = page.index("<summary>Start a session</summary>")
+        athletes_at = page.index("<summary>All athletes (1)</summary>")
+        self.assertLess(create_at, find_at)
+        self.assertLess(find_at, start_at)
+        self.assertLess(start_at, athletes_at)
+        self.assertNotIn("<details class='roster-tool create-athlete'", page)
 
     def test_group_page_blocks_accidental_exact_name_duplicate(self):
         source = self.app.database.add_group("Source Group")
