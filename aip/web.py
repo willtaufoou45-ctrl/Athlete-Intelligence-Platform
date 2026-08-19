@@ -3,24 +3,30 @@
 from __future__ import annotations
 
 import html
+import io
 import json
+import re
 import secrets
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time
 from urllib.parse import parse_qs
 
+from .auth import csrf_valid, expired_cookie, issue_session, read_session, session_cookie, verify_password
+from .config import Config
 from .database import Database
 from .domain import classify_attempts, format_seconds, normalize_distance, seconds_to_milliseconds
 from .export import export_filename, parse_export_dates, sprint_export_csv
 from .importer import build_preview, confirm_import
 
 
-def create_app(database_path: str | Path = "data/aip.sqlite3"):
-    database = Database(database_path)
+def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config | None = None):
+    config = config or Config.from_env(str(database_path))
+    database = Database(config.database_url)
     database.initialize()
     import_previews: dict[str, dict] = {}
+    login_failures: dict[str, list[float]] = {}
 
     def handle_request(environ, start_response):
         method = environ.get("REQUEST_METHOD", "GET")
@@ -29,6 +35,41 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
         try:
             if method == "GET" and path == "/diagnostics/ping":
                 return plain_text_response(start_response, "pong\n")
+            if config.auth_enabled and method == "GET" and path == "/login":
+                if environ.get("aip.session"):
+                    return redirect(start_response, "/")
+                return respond(start_response, login_page())
+            if config.auth_enabled and method == "POST" and path == "/login":
+                login_key = environ.get("REMOTE_ADDR") or "unknown"
+                cutoff = time() - 300
+                login_failures[login_key] = [item for item in login_failures.get(login_key, []) if item >= cutoff]
+                if len(login_failures[login_key]) >= 5:
+                    return respond(start_response, login_page("Try again in a few minutes."), "429 Too Many Requests")
+                data = form_data(environ)
+                valid = secrets.compare_digest(data.get("username", ""), config.coach_username or "")
+                valid = verify_password(data.get("password", ""), config.coach_password_hash or "") and valid
+                if not valid:
+                    login_failures[login_key].append(time())
+                    return respond(start_response, login_page("Invalid username or password."), "401 Unauthorized")
+                login_failures.pop(login_key, None)
+                token, _ = issue_session(config.coach_username or "coach", config.session_secret or "")
+                return redirect_with_cookie(
+                    start_response, "/", session_cookie(token, secure=request_is_secure(environ, config))
+                )
+            if config.auth_enabled and not environ.get("aip.session"):
+                if path.startswith("/api/"):
+                    return json_response(start_response, {"error": "Authentication required."}, "401 Unauthorized")
+                return redirect(start_response, "/login")
+            if config.auth_enabled and method == "POST" and path == "/logout":
+                return redirect_with_cookie(
+                    start_response, "/login", expired_cookie(secure=request_is_secure(environ, config))
+                )
+            if config.auth_enabled and method in {"POST", "PUT", "PATCH", "DELETE"}:
+                submitted = csrf_from_request(environ)
+                if not csrf_valid(environ, environ["aip.session"], submitted):
+                    if path.startswith("/api/"):
+                        return json_response(start_response, {"error": "Request verification failed."}, "403 Forbidden")
+                    return respond(start_response, page("Request expired", "<h1>Request expired</h1><p>Reload the page and try again.</p>"), "403 Forbidden")
             if method == "GET" and path == "/":
                 return respond(start_response, home_page(database))
             if method == "GET" and len(parts) == 3 and parts[:2] == ["internal", "intelligence"]:
@@ -135,7 +176,37 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 return respond(start_response, group_page(database, resource_id(parts[1], "Training Group")))
             if method == "POST" and len(parts) == 3 and parts[0] == "groups" and parts[2] == "athletes":
                 group_id = resource_id(parts[1], "Training Group")
-                database.add_group_athlete(group_id, form_data(environ).get("name", ""))
+                database.create_group_athlete(group_id, form_data(environ).get("name", ""))
+                return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["athletes", "existing"]:
+                group_id = resource_id(parts[1], "Training Group")
+                database.add_existing_group_athlete(
+                    group_id, resource_id(form_data(environ).get("athlete_id"), "athlete")
+                )
+                return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["roster", "reorder"]:
+                group_id = resource_id(parts[1], "Training Group")
+                data = form_data(environ)
+                database.reorder_group_athlete(
+                    group_id, resource_id(data.get("athlete_id"), "athlete"), data.get("direction", ""),
+                )
+                return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["roster", "transfer"]:
+                group_id = resource_id(parts[1], "Training Group")
+                data = form_data(environ)
+                action = data.get("action", "")
+                if action not in {"copy", "move"}:
+                    raise ValueError("Choose copy or move.")
+                database.transfer_group_athlete(
+                    group_id, resource_id(data.get("athlete_id"), "athlete"),
+                    resource_id(data.get("target_group_id"), "Training Group"), move=action == "move",
+                )
+                return redirect(start_response, f"/groups/{group_id}")
+            if method == "POST" and len(parts) == 4 and parts[0] == "groups" and parts[2:] == ["roster", "remove"]:
+                group_id = resource_id(parts[1], "Training Group")
+                database.remove_group_athlete(
+                    group_id, resource_id(form_data(environ).get("athlete_id"), "athlete"),
+                )
                 return redirect(start_response, f"/groups/{group_id}")
             if method == "POST" and len(parts) == 3 and parts[0] == "groups" and parts[2] == "sessions":
                 group_id = resource_id(parts[1], "Training Group")
@@ -171,7 +242,10 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
                 session_id = resource_id(parts[2], "session")
                 data = json_data(environ)
                 athlete_id = resource_id(data.get("athlete_id", ""), "athlete")
-                attempt_id = database.add_attempt(session_id, athlete_id, seconds_to_milliseconds(data.get("elapsed_seconds", "")))
+                attempt_id = database.add_attempt(
+                    session_id, athlete_id, seconds_to_milliseconds(data.get("elapsed_seconds", "")),
+                    data.get("request_id"),
+                )
                 return json_response(start_response, athlete_summary(database, session_id, athlete_id, attempt_id), "201 Created")
             if method == "POST" and len(parts) == 4 and parts[0:2] == ["api", "attempts"] and parts[3] == "edit":
                 attempt_id = resource_id(parts[2], "attempt")
@@ -203,6 +277,8 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/") or "/"
         client_ip = environ.get("REMOTE_ADDR") or "-"
+        if config.auth_enabled:
+            environ["aip.session"] = read_session(environ, config.session_secret or "")
         try:
             response = handle_request(environ, capture_response)
         except Exception:
@@ -217,8 +293,13 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
             if name.lower() != "server-timing"
         ]
         headers.append(("Server-Timing", f"app;dur={elapsed_ms:.3f}"))
+        headers.extend(security_headers(request_is_secure(environ, config)))
         if path == "/diagnostics/ping":
             headers.append(("Cache-Control", "no-store"))
+        if (config.auth_enabled and environ.get("aip.session") and isinstance(response, (list, tuple))
+                and any(name.lower() == "content-type" and value.startswith("text/html") for name, value in headers)):
+            response = [inject_csrf(b"".join(response), environ["aip.session"]["csrf"])]
+            headers = [(name, value) for name, value in headers if name.lower() != "content-length"]
         body_size = sum(len(chunk) for chunk in response) if isinstance(response, (list, tuple)) else 0
         if not any(name.lower() == "content-length" for name, _ in headers) and isinstance(response, (list, tuple)):
             headers.append(("Content-Length", str(body_size)))
@@ -232,7 +313,21 @@ def create_app(database_path: str | Path = "data/aip.sqlite3"):
 
     app.database = database
     app.import_previews = import_previews
+    app.config = config
+    app.login_failures = login_failures
     return app
+
+
+def login_page(error: str = "") -> str:
+    message = f"<p class='error'>{html.escape(error)}</p>" if error else ""
+    body = f"""
+    <header><p class='eyebrow'>Athlete Intelligence Platform</p><h1>Coach sign in</h1></header>
+    <main class='capture-layout'><section class='card'>{message}<form method='post' action='/login'>
+      <label>Username<input name='username' autocomplete='username' required></label>
+      <label>Password<input type='password' name='password' autocomplete='current-password' required></label>
+      <button>Sign in</button>
+    </form></section></main>"""
+    return page("Coach sign in", body, show_nav=False)
 
 
 def home_page(db: Database) -> str:
@@ -321,8 +416,15 @@ def group_page(db: Database, group_id: int) -> str:
     if not group:
         raise LookupError("Training Group not found.")
     roster = db.group_roster(group_id)
+    roster_ids = {athlete["id"] for athlete in roster}
+    athlete_directory = db.athlete_directory()
+    directory_by_id = {athlete["id"]: athlete for athlete in athlete_directory}
+    available_athletes = [athlete for athlete in athlete_directory if athlete["id"] not in roster_ids]
+    directory_json = json.dumps(available_athletes).replace("<", "\\u003c")
+    all_groups = db.all_groups()
     roster_items = "".join(
-        f"<li><span class='position'>{athlete['position']}</span>{html.escape(athlete['name'])}</li>" for athlete in roster
+        roster_member_controls(group_id, athlete, directory_by_id[athlete["id"]]["groups"], all_groups)
+        for athlete in roster
     ) or "<li class='muted'>No athletes yet.</li>"
     all_sessions = db.group_sessions(group_id)
     active_sessions = [session for session in all_sessions if session["status"] == "open"]
@@ -333,11 +435,39 @@ def group_page(db: Database, group_id: int) -> str:
     body = f"""
     <header><a href='/'>← Training Groups</a><p class='eyebrow'>Recurring Training Group</p><h1>{html.escape(group['name'])}</h1><p>{len(roster)} athletes in persistent training order.</p></header>
     <main class='home-grid'>
-      <section class='card'><h2>Persistent roster</h2><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>Athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Athlete name'></label><button>Add athlete</button></form><ol class='roster'>{roster_items}</ol></section>
-      <section class='card'><h2>Start a session</h2>{session_form(f'/groups/{group_id}/sessions', disabled)}{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</section>
+      <section class='card roster-card'><h2>Persistent roster</h2><p class='muted'>Changes apply to future sessions. Existing session rosters stay unchanged.</p>
+        <section class='roster-tool create-athlete'><h3>Create a new athlete</h3><form method='post' action='/groups/{group_id}/athletes' class='inline-form'><label>New athlete name<input name='name' maxlength='100' required data-desktop-autofocus placeholder='Full athlete name'></label><button>Create and add</button></form><p class='muted'>The athlete will be added to {html.escape(group['name'])}.</p></section>
+        <details class='roster-tool athlete-picker'><summary>Find an existing athlete</summary><div class='details-content'><label>Search by name<input id='existing-athlete-search' maxlength='100' autocomplete='off' placeholder='Type part of a name'></label><p class='muted'>Matching athletes and their current groups will appear as you type.</p><div id='existing-athlete-results' class='athlete-search-results' aria-live='polite'></div></div></details>
+        <details class='roster-tool start-session'><summary>Start a session</summary><div class='details-content'>{session_form(f'/groups/{group_id}/sessions', disabled)}{'<p class="notice">Add an athlete before starting a session.</p>' if not roster else ''}</div></details>
+        <details class='roster-tool all-athletes'><summary>All athletes ({len(roster)})</summary><ol class='roster'>{roster_items}</ol></details></section>
       <section class='card sessions'><h2>Active sessions</h2>{active}<details class='completed-sessions'><summary>Completed session history</summary>{completed}</details><h3>Historical data</h3><p><a class='button-link' href='/groups/{group_id}/imports/new'>Import historical sprint CSV</a></p><h3>Export sprint data</h3><form method='get' action='/groups/{group_id}/export.csv' class='export-form'><label>Start date (optional)<input type='date' name='start'></label><label>End date (optional)<input type='date' name='end'></label><button>Export Group CSV</button></form></section>
-    </main>"""
+    </main><script>const athleteDirectory={directory_json};const athleteSearch=document.querySelector('#existing-athlete-search'),athleteResults=document.querySelector('#existing-athlete-results');
+      const escapeAthleteText=value=>String(value).replace(/[&<>'"]/g,character=>({{'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}}[character]));
+      function showAthleteMatches(){{const query=athleteSearch.value.trim().toLowerCase();if(!query){{athleteResults.innerHTML='';return;}}const matches=athleteDirectory.filter(item=>item.name.toLowerCase().includes(query)).slice(0,10);athleteResults.innerHTML=matches.map(item=>`<form method="post" action="/groups/{group_id}/athletes/existing" class="athlete-search-result"><input type="hidden" name="athlete_id" value="${{item.id}}"><span><strong>${{escapeAthleteText(item.name)}}</strong><small>${{item.groups.length?escapeAthleteText(item.groups.map(group=>group.name).join(' · ')):'Not currently in a group'}}</small></span><button>Add</button></form>`).join('')||(query.length<2?'<p class="muted">Type another letter to narrow the list.</p>':'<p class="muted">No existing athletes match. Create a new athlete below if needed.</p>');}}
+      athleteSearch.addEventListener('input',showAthleteMatches);</script>"""
     return page(group["name"], body)
+
+
+def roster_member_controls(group_id: int, athlete: dict, memberships: list[dict], all_groups: list[dict]) -> str:
+    athlete_id = athlete["id"]
+    membership_ids = {item["id"] for item in memberships}
+    membership_names = ", ".join(item["name"] for item in memberships)
+    available_groups = [item for item in all_groups if item["id"] not in membership_ids]
+    target_options = "<option value='' selected disabled>Choose another group</option>" + "".join(
+        f"<option value='{item['id']}'>{html.escape(item['name'])}</option>" for item in available_groups
+    )
+    transfer = f"""<form method='post' action='/groups/{group_id}/roster/transfer' class='roster-transfer'>
+      <input type='hidden' name='athlete_id' value='{athlete_id}'>
+      <label>Other groups<select name='target_group_id' required>{target_options}</select></label>
+      <button name='action' value='move'>Move</button><button name='action' value='copy'>Add to both</button>
+    </form>""" if available_groups else "<span class='muted'>This athlete is already in every Training Group.</span>"
+    return f"""<li class='roster-member'><div class='roster-person'><span class='position'>{athlete['position']}</span><strong>{html.escape(athlete['name'])}</strong></div>
+      <p class='athlete-memberships'><strong>Current groups:</strong> {html.escape(membership_names)}</p>
+      <div class='roster-actions'><form method='post' action='/groups/{group_id}/roster/reorder'>
+        <input type='hidden' name='athlete_id' value='{athlete_id}'><button name='direction' value='up' aria-label='Move {html.escape(athlete['name'])} up'>↑</button><button name='direction' value='down' aria-label='Move {html.escape(athlete['name'])} down'>↓</button>
+      </form>{transfer}<form method='post' action='/groups/{group_id}/roster/remove' onsubmit="return confirm('Remove this athlete from future sessions in this group?')">
+        <input type='hidden' name='athlete_id' value='{athlete_id}'><button class='text-danger'>Remove</button>
+      </form></div></li>"""
 
 
 def session_label(session: dict, group_name: str | None = None) -> str:
@@ -513,8 +643,8 @@ def session_page(db: Database, session_id: int) -> str:
         {status_notice}{empty}<form id='capture-form' data-session='{session_id}' data-completed='{'true' if completed else 'false'}'>
           <div class='athlete-flow'><button type='button' id='previous-athlete' class='flow-button' aria-label='Previous athlete'>←</button><div class='active-athlete'><span id='athlete-position'>Athlete</span><strong id='athlete-name'>Choose athlete</strong></div><button type='button' id='next-athlete' class='flow-button' aria-label='Next athlete'>→</button></div>
           <input type='hidden' id='athlete' required>
-          <label>Time (seconds)<div class='time-row'><input id='elapsed' inputmode='decimal' autocomplete='off' placeholder='1.72' required {disabled}></div></label>
-          <p class='autosave-note'>{'Capture is closed.' if completed else 'Times save automatically after you finish typing. Press Enter to save immediately.'}</p>
+          <label>Time (seconds)<div class='time-row'><input id='elapsed' inputmode='numeric' autocomplete='off' placeholder='1.72' maxlength='5' required {disabled}></div></label>
+          <p class='autosave-note'>{'Capture is closed.' if completed else 'Type digits only—the decimal appears automatically (172 becomes 1.72). Times save automatically after you finish typing.'}</p>
           <div class='up-next'><p class='eyebrow'>Next three</p><ol id='up-next-list'></ol></div>
         </form><p id='feedback' role='status' aria-live='polite'></p>
         <div id='results'><p class='muted'>Select an athlete to see their results.</p></div>
@@ -751,12 +881,66 @@ def redirect(start_response, location: str):
     return [b""]
 
 
+def redirect_with_cookie(start_response, location: str, cookie: str):
+    start_response("303 See Other", [("Location", location), ("Set-Cookie", cookie), ("Content-Length", "0")])
+    return [b""]
+
+
+def request_is_secure(environ: dict, config: Config) -> bool:
+    if environ.get("wsgi.url_scheme") == "https":
+        return True
+    forwarded = environ.get("HTTP_X_FORWARDED_PROTO", "").split(",")[0].strip()
+    return bool(config.trusted_proxy and forwarded == "https")
+
+
+def security_headers(secure: bool) -> list[tuple[str, str]]:
+    headers = [
+        ("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        ("X-Frame-Options", "DENY"),
+    ]
+    if secure:
+        headers.append(("Strict-Transport-Security", "max-age=31536000; includeSubDomains"))
+    return headers
+
+
+def csrf_from_request(environ: dict) -> str | None:
+    header = environ.get("HTTP_X_CSRF_TOKEN")
+    if header:
+        return header
+    content_type = environ.get("CONTENT_TYPE", "")
+    length = int(environ.get("CONTENT_LENGTH") or 0)
+    payload = environ["wsgi.input"].read(length)
+    environ["wsgi.input"] = io.BytesIO(payload)
+    if content_type.startswith("application/x-www-form-urlencoded"):
+        return parse_qs(payload.decode()).get("csrf_token", [None])[0]
+    if content_type.startswith("multipart/form-data"):
+        try:
+            fields, _ = multipart_form(environ)
+            return fields.get("csrf_token")
+        finally:
+            environ["wsgi.input"] = io.BytesIO(payload)
+    return None
+
+
+def inject_csrf(payload: bytes, token: str) -> bytes:
+    content = payload.decode()
+    escaped = html.escape(token, quote=True)
+    content = content.replace("</head>", f"<meta name='csrf-token' content='{escaped}'></head>")
+    hidden = f"<input type='hidden' name='csrf_token' value='{escaped}'>"
+    content = re.sub(r"(<form\b[^>]*\bmethod=['\"]post['\"][^>]*>)", r"\1" + hidden, content, flags=re.I)
+    logout = f"<form method='post' action='/logout'>{hidden}<button>Sign out</button></form>"
+    content = content.replace("</nav>", logout + "</nav>", 1)
+    return content.encode()
+
+
 CAPTURE_SCRIPT = r"""
 const form=document.querySelector('#capture-form'), athlete=document.querySelector('#athlete'), athleteName=document.querySelector('#athlete-name'), athletePosition=document.querySelector('#athlete-position'), athleteSearch=document.querySelector('#athlete-search'), previousAthlete=document.querySelector('#previous-athlete'), nextAthlete=document.querySelector('#next-athlete'), upNextList=document.querySelector('#up-next-list'), elapsed=document.querySelector('#elapsed'), feedback=document.querySelector('#feedback'), results=document.querySelector('#results');
 const sessionId=form.dataset.session;
 const completed=form.dataset.completed==='true';
 const finePointer=window.matchMedia('(hover: hover) and (pointer: fine)').matches;
-let activeIndex=-1,saveTimer=null,saving=false;
+let activeIndex=-1,saveTimer=null,saving=false,pendingRequestId=null;
 const escapeHtml=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 function render(data){
   const allTime=data.all_time_best?`<strong>${escapeHtml(data.all_time_best.time)}s</strong><span>${escapeHtml(data.all_time_best.date)}</span>`:'<strong>—</strong><span>No comparable result</span>';
@@ -764,15 +948,17 @@ function render(data){
   const rows=data.attempts.map(a=>`<li class="attempt ${a.just_saved?'saved':''}"><div><strong>${escapeHtml(a.time)}s</strong> ${a.status==='baseline'?'<span class="badge baseline">Baseline</span>':a.status==='pr'?'<span class="badge pr">PR</span>':''}</div>${data.editable?`<div class="actions"><button type="button" onclick="editAttempt(${a.id}, '${escapeHtml(a.time)}')">Edit</button><button type="button" class="danger" onclick="deleteAttempt(${a.id})">Delete</button></div>`:''}</li>`).join('');
   results.innerHTML=`<div class="reference-grid"><div><p>All-time best</p>${allTime}</div><div><p>Previous session</p>${previous}</div></div><div class="current-results"><div class="result-heading"><p class="eyebrow">This session</p><div class="best"><span>Best</span><strong>${data.best?escapeHtml(data.best)+'s':'—'}</strong></div></div>${rows?`<ol class="attempts">${rows}</ol>`:'<p class="muted">No attempts yet.</p>'}</div>`;
 }
-async function request(url, body={}){const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not save.');return data;}
+async function request(url, body={}){const csrf=document.querySelector("meta[name='csrf-token']")?.content||'';const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not save.');return data;}
 async function loadAthlete(){if(!athlete.value){results.innerHTML='<p class="muted">Select an athlete to see their results.</p>';return;}const response=await fetch(`/api/sessions/${sessionId}/athletes/${athlete.value}`);const data=await response.json();if(response.ok)render(data);else feedback.textContent=data.error||'Could not load results.';}
 function renderUpNext(){const count=Math.min(3,Math.max(0,athletes.length-1));upNextList.innerHTML=Array.from({length:count},(_,offset)=>{const index=(activeIndex+offset+1)%athletes.length;return `<li><span>${index+1}</span><strong>${escapeHtml(athletes[index].name)}</strong></li>`;}).join('')||'<li class="muted">No other athletes queued.</li>';}
 async function setAthlete(index,focusTime=true){if(!athletes.length)return;activeIndex=(index+athletes.length)%athletes.length;const selected=athletes[activeIndex];athlete.value=selected.id;athleteName.textContent=selected.name;athletePosition.textContent=`Athlete ${activeIndex+1} of ${athletes.length}`;athleteSearch.value='';localStorage.setItem(`aip-session-${sessionId}-athlete`,selected.id);renderUpNext();await loadAthlete();if(focusTime&&!completed)elapsed.focus();}
-async function saveAttempt(){if(completed||saving||!elapsed.value.trim())return;clearTimeout(saveTimer);saving=true;feedback.textContent='Saving…';try{const data=await request(`/api/sessions/${sessionId}/attempts`,{athlete_id:athlete.value,elapsed_seconds:elapsed.value});render(data);elapsed.value='';feedback.textContent='Saved.';}catch(error){feedback.textContent=error.message;}finally{saving=false;if(!completed)elapsed.focus();}}
+async function saveAttempt(){if(completed||saving||!elapsed.value.trim())return;clearTimeout(saveTimer);saving=true;pendingRequestId=pendingRequestId||(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random()}`);feedback.textContent='Saving…';try{const data=await request(`/api/sessions/${sessionId}/attempts`,{athlete_id:athlete.value,elapsed_seconds:elapsed.value,request_id:pendingRequestId});render(data);elapsed.value='';pendingRequestId=null;feedback.textContent='Saved.';}catch(error){feedback.textContent=`Not confirmed — ${error.message} Retry with the time still entered.`;}finally{saving=false;if(!completed)elapsed.focus();}}
 previousAthlete.addEventListener('click',()=>setAthlete(activeIndex-1));
 nextAthlete.addEventListener('click',()=>setAthlete(activeIndex+1));
 athleteSearch.addEventListener('change',()=>{const typed=athleteSearch.value.trim().toLowerCase();const index=athletes.findIndex((item,i)=>`${i+1} · ${item.name}`.toLowerCase()===typed||item.name.toLowerCase()===typed);if(index>=0)setAthlete(index);else feedback.textContent='Choose an athlete from the roster.';});
-elapsed.addEventListener('input',()=>{clearTimeout(saveTimer);feedback.textContent='';if(/^\d+\.\d{1,3}$/.test(elapsed.value.trim()))saveTimer=setTimeout(saveAttempt,900);});
+function formatSprintTime(value){const digits=value.replace(/\D/g,'').slice(0,4);return digits?`${digits[0]}.${digits.slice(1)}`:'';}
+elapsed.addEventListener('beforeinput',event=>{if(event.inputType==='deleteContentBackward'&&elapsed.selectionStart===elapsed.value.length&&elapsed.selectionEnd===elapsed.value.length&&/^\d\.$/.test(elapsed.value)){event.preventDefault();elapsed.value='';feedback.textContent='';}});
+elapsed.addEventListener('input',()=>{clearTimeout(saveTimer);feedback.textContent='';elapsed.value=formatSprintTime(elapsed.value);if(/^\d\.\d{1,3}$/.test(elapsed.value))saveTimer=setTimeout(saveAttempt,900);});
 form.addEventListener('submit',async event=>{event.preventDefault();await saveAttempt();});
 window.editAttempt=async(id,current)=>{const value=prompt('Correct time in seconds:',current);if(value===null)return;try{render(await request(`/api/attempts/${id}/edit`,{elapsed_seconds:value}));feedback.textContent='Attempt updated.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
 window.deleteAttempt=async id=>{if(!confirm('Delete this attempt?'))return;try{render(await request(`/api/attempts/${id}/delete`));feedback.textContent='Attempt deleted.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
@@ -796,4 +982,6 @@ STYLES = """
 .export-form{display:flex;align-items:end;gap:10px;margin-top:14px}.export-form label{flex:1}@media(max-width:720px){.export-form{align-items:stretch;flex-direction:column}}
 .completed-sessions{margin-top:20px;border-top:1px solid #e6eae3;padding-top:16px}.completed-sessions summary,.add-session-athlete summary{font-weight:800;cursor:pointer}.session-entry{display:grid;grid-template-columns:1fr auto;align-items:center;border-top:1px solid #e6eae3}.session-entry .session-link{border:0}.session-entry form{margin:0}.text-danger{background:transparent;color:#8c2c24;border-color:#d7aaa6;padding:7px 10px}.header-actions,.session-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.session-actions form{margin:0}.danger-button{background:#fff;color:#8c2c24;border-color:#d7aaa6}.up-next{background:#eef3ec;border-radius:12px;padding:12px 16px}.up-next p{margin-bottom:5px}.up-next ol{list-style:none;margin:0;padding:0}.up-next li{display:flex;gap:10px;align-items:center;padding:5px 0}.up-next li span{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#fff;font-size:.75rem}.autosave-note{font-size:.85rem;color:#6d776e;margin:-8px 0 0}.add-session-athlete{border-top:1px solid #e6eae3;margin-top:18px;padding-top:16px}.add-session-athlete form{margin-top:12px}.add-session-athlete p{margin:8px 0 0;font-size:.85rem}@media(max-width:720px){.session-entry{grid-template-columns:1fr}.session-entry form{padding-bottom:12px}.header-actions{align-items:stretch;flex-direction:column}.header-actions>a,.header-actions form,.header-actions button{width:100%;text-align:center}.session-management .session-actions{flex-direction:column}.session-management .session-actions>a,.session-management .session-actions form,.session-management .session-actions button{width:100%}}
 a,button,summary{touch-action:manipulation}a:active,button:active,summary:active{opacity:.72}
+.roster-member{display:block!important;padding:14px 0!important}.roster-person{display:flex;align-items:center;gap:10px}.roster-actions{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin:10px 0 0 38px}.roster-actions form{display:flex;align-items:end;gap:6px;margin:0}.roster-actions button{padding:8px 10px}.roster-transfer label{font-size:.8rem}.roster-transfer select{padding:8px}@media(max-width:720px){.roster-actions{align-items:stretch;flex-direction:column;margin-left:0}.roster-actions form,.roster-transfer{display:flex;flex-wrap:wrap}.roster-transfer label{flex:1 1 100%}.roster-transfer select{width:100%}.roster-actions button{min-height:44px}}
+.roster-card{grid-column:1/-1}.roster-tool{border-top:1px solid #e6eae3;padding:16px 0}.roster-tool h3{margin:0 0 10px}.roster-tool summary{font-size:1.05rem;font-weight:800;cursor:pointer}.details-content{padding-top:14px}.athlete-picker label{max-width:520px}.athlete-picker p,.create-athlete p{font-size:.85rem;margin:7px 0}.athlete-search-results{display:grid;gap:7px;margin-top:10px}.athlete-search-result{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #dce2d8;border-radius:10px;padding:9px;background:#f7f8f5}.athlete-search-result span,.athlete-search-result small{display:block}.athlete-search-result small{color:#6d776e}.athlete-search-result button{padding:8px 14px}.start-session .session-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:end}.start-session .session-form button,.start-session .session-form p{grid-column:1/-1}.all-athletes .roster{margin-bottom:0}.athlete-memberships{font-size:.82rem;color:#6d776e;margin:5px 0 0 38px}@media(max-width:720px){.athlete-search-result button{min-height:44px}.create-athlete .inline-form,.start-session .session-form{display:flex;align-items:stretch;flex-direction:column}.athlete-memberships{margin-left:0}}
 """

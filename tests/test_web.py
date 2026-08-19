@@ -94,6 +94,14 @@ class WebTests(unittest.TestCase):
         second = self.call("POST", f"/api/sessions/{self.session_id}/attempts", {"athlete_id": self.athlete_id, "elapsed_seconds": "1.75"})
         self.assertEqual(json.loads(second["body"])["attempts"][0]["status"], "pr")
 
+    def test_save_endpoint_deduplicates_a_retried_request_identifier(self):
+        payload = {"athlete_id": self.athlete_id, "elapsed_seconds": "1.80", "request_id": "retry-1"}
+        first = self.call("POST", f"/api/sessions/{self.session_id}/attempts", payload)
+        retry = self.call("POST", f"/api/sessions/{self.session_id}/attempts", payload)
+        self.assertEqual(first["status"], "201 Created")
+        self.assertEqual(retry["status"], "201 Created")
+        self.assertEqual(len(self.app.database.all_attempts()), 1)
+
     def test_invalid_input_is_reported_without_saving(self):
         response = self.call("POST", f"/api/sessions/{self.session_id}/attempts", {"athlete_id": self.athlete_id, "elapsed_seconds": "fast"})
         self.assertEqual(response["status"], "400 Bad Request")
@@ -230,6 +238,70 @@ class WebTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in self.app.database.session_athletes(first_session)], [first, second])
         self.assertEqual([a["id"] for a in self.app.database.session_athletes(second_session)], [first, second])
 
+    def test_group_roster_management_routes_move_copy_reorder_and_remove(self):
+        source = self.app.database.add_group("Source Group")
+        target = self.app.database.add_group("Target Group")
+        first = self.app.database.add_group_athlete(source, "First Runner")
+        second = self.app.database.add_group_athlete(source, "Second Runner")
+        page = self.call("GET", f"/groups/{source}")["body"].decode()
+        self.assertIn("Add to both", page)
+        self.assertIn("Changes apply to future sessions", page)
+        self.assertIn("Current groups:</strong> Source Group", page)
+        self.assertIn("Choose another group", page)
+        self.assertNotIn("value='2' selected", page)
+
+        self.call("POST", f"/groups/{source}/roster/reorder", {"athlete_id": second, "direction": "up"}, form=True)
+        self.call("POST", f"/groups/{source}/roster/transfer", {"athlete_id": first, "target_group_id": target, "action": "copy"}, form=True)
+        self.call("POST", f"/groups/{source}/roster/transfer", {"athlete_id": second, "target_group_id": target, "action": "move"}, form=True)
+        self.call("POST", f"/groups/{target}/roster/remove", {"athlete_id": first}, form=True)
+
+        self.assertEqual([a["id"] for a in self.app.database.group_roster(source)], [first])
+        self.assertEqual([a["id"] for a in self.app.database.group_roster(target)], [second])
+
+    def test_group_page_searches_and_adds_existing_athlete_without_duplicate(self):
+        source = self.app.database.add_group("Source Group")
+        target = self.app.database.add_group("Target Group")
+        athlete_id = self.app.database.add_group_athlete(source, "Jordan Lee")
+
+        page = self.call("GET", f"/groups/{target}")["body"].decode()
+        self.assertIn("Find an existing athlete", page)
+        self.assertIn("Jordan Lee", page)
+        self.assertIn("Source Group", page)
+        self.assertIn("includes(query)", page)
+
+        response = self.call(
+            "POST", f"/groups/{target}/athletes/existing", {"athlete_id": athlete_id}, form=True
+        )
+        self.assertEqual(response["status"], "303 See Other")
+        self.assertEqual([a["id"] for a in self.app.database.group_roster(target)], [athlete_id])
+        self.assertEqual(len(self.app.database.all_athletes()), 2)
+
+    def test_group_page_uses_collapsed_mobile_workflow_in_requested_order(self):
+        group_id = self.app.database.add_group("Workflow Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+
+        page = self.call("GET", f"/groups/{group_id}")["body"].decode()
+
+        create_at = page.index("Create a new athlete")
+        find_at = page.index("<summary>Find an existing athlete</summary>")
+        start_at = page.index("<summary>Start a session</summary>")
+        athletes_at = page.index("<summary>All athletes (1)</summary>")
+        self.assertLess(create_at, find_at)
+        self.assertLess(find_at, start_at)
+        self.assertLess(start_at, athletes_at)
+        self.assertNotIn("<details class='roster-tool create-athlete'", page)
+
+    def test_group_page_blocks_accidental_exact_name_duplicate(self):
+        source = self.app.database.add_group("Source Group")
+        target = self.app.database.add_group("Target Group")
+        self.app.database.add_group_athlete(source, "Jordan Lee")
+
+        response = self.call("POST", f"/groups/{target}/athletes", {"name": "jordan lee"}, form=True)
+
+        self.assertEqual(response["status"], "400 Bad Request")
+        self.assertIn(b"already exists", response["body"])
+        self.assertEqual(len([a for a in self.app.database.all_athletes() if a["name"].lower() == "jordan lee"]), 1)
+
     def test_earlier_capture_page_keeps_its_roster_after_group_changes(self):
         group_id = self.app.database.add_group("Snapshot Team")
         original_id = self.app.database.add_group_athlete(group_id, "Original Runner")
@@ -287,6 +359,19 @@ class WebTests(unittest.TestCase):
         self.assertIn("setTimeout(saveAttempt,900)", body)
         self.assertIn("Times save automatically", body)
         self.assertNotIn("id='save'", body)
+
+    def test_capture_time_input_automatically_places_decimal_after_first_digit(self):
+        group_id = self.app.database.add_group("Decimal Input Group")
+        self.app.database.add_group_athlete(group_id, "Runner")
+        session_id = self.app.database.add_group_session(group_id, "10", "yards")
+
+        body = self.call("GET", f"/sessions/{session_id}")["body"].decode()
+
+        self.assertIn("inputmode='numeric'", body)
+        self.assertIn("172 becomes 1.72", body)
+        self.assertIn("function formatSprintTime(value)", body)
+        self.assertIn("`${digits[0]}.${digits.slice(1)}`", body)
+        self.assertIn("/^\\d\\.\\d{1,3}$/", body)
 
     def test_capture_page_prioritizes_live_controls_before_session_management(self):
         group_id = self.app.database.add_group("Mobile Priority Group")

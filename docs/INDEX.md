@@ -30,7 +30,7 @@ documented** are intentional gaps, not missing links.
 - [FEAT-002 — Training Groups & Persistent Rosters](product/FEATURE_BACKLOG.md#feat-002--training-groups--persistent-rosters) — Discovery
 - [FEAT-003 — Roster Import & Group Management](product/FEATURE_BACKLOG.md#feat-003--roster-import--group-management) — Discovery
 - [FEAT-004 — Historical Sprint Import](product/FEATURES/feat-004-Historical-Sprint-Import.md) — Implemented locally; awaiting field validation
-- [FEAT-005 — Athlete Queue](product/FEATURE_BACKLOG.md#feat-005--athlete-queue) — Backlog
+- [FEAT-005 — Hosted Mobile Sprint Capture](product/FEATURES/feat-005-Hosted-Mobile-Sprint-Capture.md) — Architecture implemented locally; not deployed
 - [FEAT-006 — Athlete Focus Memory](product/FEATURE_BACKLOG.md#feat-006--athlete-focus-memory) — Backlog
 
 # Intelligence

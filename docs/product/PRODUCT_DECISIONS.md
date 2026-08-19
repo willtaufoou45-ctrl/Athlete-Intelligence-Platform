@@ -271,3 +271,43 @@ Implemented locally in FEAT-001.3. Awaiting field validation.
 - [PD-002 — Training Groups are Persistent](#pd-002--training-groups-are-persistent)
 - [WI-001 — Athlete Flow](../workflow_intelligence/WI-001-Athlete-Flow.md)
 - [WI-003 — Session Setup](../workflow_intelligence/WI-003-Session-Setup.md)
+
+## PD-008 — Hosted capture preserves the validated workflow and requires internet
+
+### Decision
+
+FEAT-005 V1 should preserve the current server-rendered, phone-first Python
+workflow and move its durable state to managed PostgreSQL behind one permanent
+HTTPS address. It should use simple coach authentication and managed backups.
+It is hosted mode, not offline mode, and requires internet access.
+
+### Evidence
+
+The local prototype depends on Terminal, the coach's laptop, and a stable local
+network path from phone to laptop. During field use that path failed and the
+second sprint session could not be captured in AIP.
+
+### Reasoning
+
+The validated interaction is not the problem; its local runtime and storage are.
+Keeping the server-rendered application avoids reimplementing athlete flow,
+roster snapshots, import/export, and PR behavior. Managed PostgreSQL separates
+durable records from one application machine and provides a safer backup and
+recovery foundation than a single hosted SQLite volume.
+
+Offline capture is a distinct distributed-data problem. Adding it to V1 would
+require synchronization, conflict, ordering, identity, retry, and deletion
+semantics that are unnecessary for proving reliable hosted access.
+
+### Status
+
+Architecture implementation approved and started locally. No infrastructure
+has been created. Vendor account, budget, backup retention, real-data migration,
+and cutover still require owner approval.
+
+### Related
+
+- [FEAT-005 — Hosted Mobile Sprint Capture](FEATURES/feat-005-Hosted-Mobile-Sprint-Capture.md)
+- [FEAT-001 field review](FEATURE_REVIEWS/FEAT-001-Review.md)
+- [PD-005 — AIP Is the Sprint Data Source of Truth](#pd-005--aip-is-the-sprint-data-source-of-truth)
+- [WI-005 — Data Capture](../workflow_intelligence/WI-005-Data-Capture.md)

@@ -24,6 +24,14 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(reopened.all_athletes()[0]["name"], "Jordan")
         self.assertEqual(reopened.all_attempts()[0]["elapsed_ms"], 1720)
 
+    def test_attempt_request_key_makes_an_identical_retry_idempotent(self):
+        first = self.db.add_attempt(self.session_id, self.athlete_id, 1720, "phone-request-1")
+        retry = self.db.add_attempt(self.session_id, self.athlete_id, 1720, "phone-request-1")
+        self.assertEqual(retry, first)
+        self.assertEqual(len(self.db.all_attempts()), 1)
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            self.db.add_attempt(self.session_id, self.athlete_id, 1710, "phone-request-1")
+
     def test_flying_10_session_preserves_protocol_and_planned_attempt_count(self):
         session_id = self.db.add_session(
             "10", "yards", "flying_10_acceleration_5yd_run_in", target_attempts=4,
@@ -136,6 +144,47 @@ class DatabaseTests(unittest.TestCase):
             [(first_id, 1), (second_id, 2)],
         )
         self.db.add_attempt(session_id, first_id, 1800)
+
+    def test_roster_can_reorder_copy_move_and_remove_without_changing_session_snapshot(self):
+        source = self.db.add_group("Source")
+        target = self.db.add_group("Target")
+        first = self.db.add_group_athlete(source, "First")
+        second = self.db.add_group_athlete(source, "Second")
+        session_id = self.db.add_group_session(source, "10", "yards")
+
+        self.db.reorder_group_athlete(source, second, "up")
+        self.assertEqual([a["id"] for a in self.db.group_roster(source)], [second, first])
+        self.db.transfer_group_athlete(source, first, target, move=False)
+        self.db.transfer_group_athlete(source, second, target, move=True)
+        self.assertEqual([a["id"] for a in self.db.group_roster(source)], [first])
+        self.assertEqual([a["id"] for a in self.db.group_roster(target)], [first, second])
+        self.db.remove_group_athlete(target, first)
+        self.assertEqual([a["id"] for a in self.db.group_roster(target)], [second])
+        self.assertEqual([a["id"] for a in self.db.session_roster(session_id)], [first, second])
+
+    def test_existing_athlete_can_join_another_group_without_changing_snapshot(self):
+        source = self.db.add_group("Source")
+        target = self.db.add_group("Target")
+        athlete_id = self.db.add_group_athlete(source, "Jordan Lee")
+        session_id = self.db.add_group_session(target, "10", "yards")
+
+        self.db.add_existing_group_athlete(target, athlete_id)
+
+        self.assertEqual([a["id"] for a in self.db.group_roster(target)], [athlete_id])
+        self.assertEqual(self.db.session_roster(session_id), [])
+        directory = self.db.athlete_directory()
+        jordan = next(item for item in directory if item["id"] == athlete_id)
+        self.assertEqual([group["name"] for group in jordan["groups"]], ["Source", "Target"])
+        with self.assertRaisesRegex(ValueError, "already in"):
+            self.db.add_existing_group_athlete(target, athlete_id)
+
+    def test_group_creation_blocks_exact_existing_athlete_name(self):
+        first = self.db.add_group("First")
+        second = self.db.add_group("Second")
+        self.db.add_group_athlete(first, "Jordan Lee")
+
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.db.create_group_athlete(second, "jordan lee")
 
     def test_late_athlete_is_added_to_active_session_and_future_group_roster_only(self):
         group_id = self.db.add_group("Late Athlete Group")

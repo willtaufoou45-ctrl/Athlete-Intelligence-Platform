@@ -35,4 +35,4 @@ next athlete immediately available.
 
 - [FEAT-001 — Manual Sprint Capture](../product/FEATURES/feat-001-Manual%20Sprint%20Capture.md)
 - [FEAT-001.1 — Workflow Friction Improvements](../product/FEATURES/feat-001.1-Workflow-Friction-Improvements.md)
-- [FEAT-005 — Athlete Queue](../product/FEATURE_BACKLOG.md#feat-005--athlete-queue)
+- [Future Idea — Athlete Queue](../product/FEATURE_BACKLOG.md#future-idea--athlete-queue)

@@ -22,6 +22,7 @@ from .intelligence import (
     seed_brody_case_study,
 )
 from .domain import FLYING_10_PROTOCOL
+from .postgres import connect as postgres_connect, postgres_schema
 
 
 SCHEMA = """
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS sprint_attempts (
     session_id INTEGER NOT NULL REFERENCES sprint_capture_sessions(id) ON DELETE CASCADE,
     athlete_id INTEGER NOT NULL REFERENCES athletes(id) ON DELETE RESTRICT,
     elapsed_ms INTEGER NOT NULL CHECK(elapsed_ms > 0),
+    request_key TEXT UNIQUE,
     captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -133,31 +135,66 @@ CREATE INDEX IF NOT EXISTS idx_import_batches_scope ON import_batches(group_id, 
 CREATE INDEX IF NOT EXISTS idx_imported_results_batch ON imported_results(batch_id, source_row, source_column);
 """
 
+MIGRATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS data_migrations (
+    id BIGSERIAL PRIMARY KEY,
+    migration_key TEXT NOT NULL UNIQUE,
+    source_sha256 TEXT NOT NULL,
+    source_manifest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running','complete','failed')),
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+"""
+
+POSTGRES_SCHEMA_VERSION = 2
+
 
 class Database:
     def __init__(self, path: str | Path):
         self.path = str(path)
+        self.is_postgres = self.path.startswith(("postgres://", "postgresql://"))
 
     @contextmanager
     def connect(self):
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
+        raw_connection = None
+        if self.is_postgres:
+            raw_connection, connection = postgres_connect(self.path)
+        else:
+            connection = sqlite3.connect(self.path)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
         try:
-            with connection:
+            with (raw_connection or connection):
                 yield connection
         finally:
-            connection.close()
+            (raw_connection or connection).close()
 
     def initialize(self) -> None:
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        if not self.is_postgres:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
-            connection.executescript(SCHEMA)
-            self._migrate_session_lifecycle(connection)
-            self._migrate_sprint_protocols(connection)
-            self._backfill_legacy_session_rosters(connection)
-            connection.executescript(INTELLIGENCE_SCHEMA)
-            self._migrate_intelligence_v02(connection)
+            if self.is_postgres:
+                connection.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("aip-schema-migrations",))
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+                )
+                applied = connection.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version=?", (POSTGRES_SCHEMA_VERSION,)
+                ).fetchone()
+                if not applied:
+                    connection.executescript(postgres_schema(SCHEMA, INTELLIGENCE_SCHEMA, MIGRATION_SCHEMA))
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version) VALUES (?)", (POSTGRES_SCHEMA_VERSION,)
+                    )
+            else:
+                connection.executescript(SCHEMA)
+                self._migrate_session_lifecycle(connection)
+                self._migrate_attempt_request_keys(connection)
+                self._migrate_sprint_protocols(connection)
+                self._backfill_legacy_session_rosters(connection)
+                connection.executescript(INTELLIGENCE_SCHEMA)
+                self._migrate_intelligence_v02(connection)
 
     def seed_rigby_intelligence(self) -> str | None:
         with self.connect() as connection:
@@ -424,6 +461,15 @@ class Database:
             connection.execute("ALTER TABLE sprint_capture_sessions ADD COLUMN completed_at TEXT")
 
     @staticmethod
+    def _migrate_attempt_request_keys(connection: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(sprint_attempts)")}
+        if "request_key" not in columns:
+            connection.execute("ALTER TABLE sprint_attempts ADD COLUMN request_key TEXT")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_request_key ON sprint_attempts(request_key)"
+        )
+
+    @staticmethod
     def _migrate_sprint_protocols(connection: sqlite3.Connection) -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(sprint_capture_sessions)")}
         definitions = {
@@ -465,6 +511,22 @@ class Database:
         with self.connect() as connection:
             return [dict(row) for row in connection.execute("SELECT * FROM athletes ORDER BY name COLLATE NOCASE, id")]
 
+    def athlete_directory(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT a.id, a.name, g.id AS group_id, g.name AS group_name
+                   FROM athletes a
+                   LEFT JOIN training_group_members m ON m.athlete_id=a.id
+                   LEFT JOIN training_groups g ON g.id=m.group_id
+                   ORDER BY a.name COLLATE NOCASE, a.id, g.name COLLATE NOCASE, g.id"""
+            )
+            athletes: dict[int, dict] = {}
+            for row in rows:
+                athlete = athletes.setdefault(row["id"], {"id": row["id"], "name": row["name"], "groups": []})
+                if row["group_id"] is not None:
+                    athlete["groups"].append({"id": row["group_id"], "name": row["group_name"]})
+            return list(athletes.values())
+
     def athlete(self, athlete_id: int) -> dict | None:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM athletes WHERE id=?", (athlete_id,)).fetchone()
@@ -477,12 +539,10 @@ class Database:
 
     def all_groups(self) -> list[dict]:
         with self.connect() as connection:
-            query = """SELECT g.*, COUNT(DISTINCT m.athlete_id) AS athlete_count,
-                              COUNT(DISTINCT gs.session_id) AS session_count
-                       FROM training_groups g
-                       LEFT JOIN training_group_members m ON m.group_id=g.id
-                       LEFT JOIN training_group_sessions gs ON gs.group_id=g.id
-                       GROUP BY g.id ORDER BY g.name COLLATE NOCASE, g.id"""
+            query = """SELECT g.*,
+                              (SELECT COUNT(*) FROM training_group_members m WHERE m.group_id=g.id) AS athlete_count,
+                              (SELECT COUNT(*) FROM training_group_sessions gs WHERE gs.group_id=g.id) AS session_count
+                       FROM training_groups g ORDER BY g.name COLLATE NOCASE, g.id"""
             return [dict(row) for row in connection.execute(query)]
 
     def group(self, group_id: int) -> dict | None:
@@ -511,35 +571,142 @@ class Database:
                 raise LookupError("Training Group not found.")
             athlete_id = connection.execute("INSERT INTO athletes(name) VALUES (?)", (name,)).lastrowid
             position = connection.execute(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM training_group_members WHERE group_id=?", (group_id,)
-            ).fetchone()[0]
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM training_group_members WHERE group_id=?", (group_id,)
+            ).fetchone()["next_position"]
             connection.execute(
                 "INSERT INTO training_group_members(group_id, athlete_id, position) VALUES (?, ?, ?)",
                 (group_id, athlete_id, position),
             )
             return athlete_id
 
+    def create_group_athlete(self, group_id: int, name: str) -> int:
+        name = normalized_name(name, "Athlete")
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM athletes WHERE lower(name)=lower(?) ORDER BY id LIMIT 1", (name,)
+            ).fetchone()
+            if existing:
+                raise ValueError("An athlete with this name already exists. Search for and add the existing athlete instead.")
+        return self.add_group_athlete(group_id, name)
+
+    def add_existing_group_athlete(self, group_id: int, athlete_id: int) -> None:
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM training_groups WHERE id=?", (group_id,)).fetchone():
+                raise LookupError("Training Group not found.")
+            if not connection.execute("SELECT 1 FROM athletes WHERE id=?", (athlete_id,)).fetchone():
+                raise LookupError("Athlete not found.")
+            if connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (group_id, athlete_id),
+            ).fetchone():
+                raise ValueError("This athlete is already in this Training Group.")
+            position = connection.execute(
+                "SELECT COALESCE(MAX(position),0)+1 AS next_position FROM training_group_members WHERE group_id=?", (group_id,)
+            ).fetchone()["next_position"]
+            connection.execute(
+                "INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
+                (group_id, athlete_id, position),
+            )
+
+    def reorder_group_athlete(self, group_id: int, athlete_id: int, direction: str) -> None:
+        if direction not in {"up", "down"}:
+            raise ValueError("Choose up or down.")
+        with self.connect() as connection:
+            athlete_ids = [row["athlete_id"] for row in connection.execute(
+                "SELECT athlete_id FROM training_group_members WHERE group_id=? ORDER BY position",
+                (group_id,),
+            )]
+            if athlete_id not in athlete_ids:
+                raise LookupError("Athlete is not in this Training Group.")
+            current = athlete_ids.index(athlete_id)
+            target = current - 1 if direction == "up" else current + 1
+            if target < 0 or target >= len(athlete_ids):
+                return
+            athlete_ids[current], athlete_ids[target] = athlete_ids[target], athlete_ids[current]
+            self._set_group_order(connection, group_id, athlete_ids)
+
+    def transfer_group_athlete(
+        self, source_group_id: int, athlete_id: int, target_group_id: int, *, move: bool,
+    ) -> None:
+        if source_group_id == target_group_id:
+            raise ValueError("Choose a different Training Group.")
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (source_group_id, athlete_id),
+            ).fetchone():
+                raise LookupError("Athlete is not in this Training Group.")
+            if not connection.execute("SELECT 1 FROM training_groups WHERE id=?", (target_group_id,)).fetchone():
+                raise LookupError("Target Training Group not found.")
+            if not connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (target_group_id, athlete_id),
+            ).fetchone():
+                position = connection.execute(
+                    "SELECT COALESCE(MAX(position),0)+1 AS next_position FROM training_group_members WHERE group_id=?",
+                    (target_group_id,),
+                ).fetchone()["next_position"]
+                connection.execute(
+                    "INSERT INTO training_group_members(group_id,athlete_id,position) VALUES (?,?,?)",
+                    (target_group_id, athlete_id, position),
+                )
+            if move:
+                self._remove_group_member(connection, source_group_id, athlete_id)
+
+    def remove_group_athlete(self, group_id: int, athlete_id: int) -> None:
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (group_id, athlete_id),
+            ).fetchone():
+                raise LookupError("Athlete is not in this Training Group.")
+            self._remove_group_member(connection, group_id, athlete_id)
+
+    @staticmethod
+    def _remove_group_member(connection, group_id: int, athlete_id: int) -> None:
+        connection.execute(
+            "DELETE FROM training_group_members WHERE group_id=? AND athlete_id=?",
+            (group_id, athlete_id),
+        )
+        remaining = [row["athlete_id"] for row in connection.execute(
+            "SELECT athlete_id FROM training_group_members WHERE group_id=? ORDER BY position",
+            (group_id,),
+        )]
+        Database._set_group_order(connection, group_id, remaining)
+
+    @staticmethod
+    def _set_group_order(connection, group_id: int, athlete_ids: list[int]) -> None:
+        for temporary, athlete_id in enumerate(athlete_ids, 100001):
+            connection.execute(
+                "UPDATE training_group_members SET position=? WHERE group_id=? AND athlete_id=?",
+                (temporary, group_id, athlete_id),
+            )
+        for position, athlete_id in enumerate(athlete_ids, 1):
+            connection.execute(
+                "UPDATE training_group_members SET position=? WHERE group_id=? AND athlete_id=?",
+                (position, group_id, athlete_id),
+            )
+
     def group_sessions(self, group_id: int) -> list[dict]:
         if not self.group(group_id):
             raise LookupError("Training Group not found.")
         with self.connect() as connection:
-            query = """SELECT s.*, COUNT(a.id) AS attempt_count
+            query = """SELECT s.*,
+                              (SELECT COUNT(*) FROM sprint_attempts a WHERE a.session_id=s.id) AS attempt_count
                        FROM training_group_sessions gs
                        JOIN sprint_capture_sessions s ON s.id=gs.session_id
-                       LEFT JOIN sprint_attempts a ON a.session_id=s.id
-                       WHERE gs.group_id=? GROUP BY s.id
+                       WHERE gs.group_id=?
                        ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END,
                                 s.session_date DESC, s.id DESC"""
             return [dict(row) for row in connection.execute(query, (group_id,))]
 
     def all_sessions(self) -> list[dict]:
         with self.connect() as connection:
-            query = """SELECT s.*, g.name AS group_name, COUNT(a.id) AS attempt_count
+            query = """SELECT s.*, g.name AS group_name,
+                              (SELECT COUNT(*) FROM sprint_attempts a WHERE a.session_id=s.id) AS attempt_count
                        FROM sprint_capture_sessions s
-                       LEFT JOIN sprint_attempts a ON a.session_id=s.id
                        LEFT JOIN training_group_sessions gs ON gs.session_id=s.id
                        LEFT JOIN training_groups g ON g.id=gs.group_id
-                       GROUP BY s.id
                        ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END,
                                 s.session_date DESC, s.id DESC"""
             return [dict(row) for row in connection.execute(query)]
@@ -726,13 +893,13 @@ class Database:
                 raise ValueError("Add athletes to standalone sessions from the home page.")
             athlete_id = connection.execute("INSERT INTO athletes(name) VALUES (?)", (name,)).lastrowid
             group_position = connection.execute(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM training_group_members WHERE group_id=?",
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM training_group_members WHERE group_id=?",
                 (group["group_id"],),
-            ).fetchone()[0]
+            ).fetchone()["next_position"]
             session_position = connection.execute(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM session_roster_members WHERE session_id=?",
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM session_roster_members WHERE session_id=?",
                 (session_id,),
-            ).fetchone()[0]
+            ).fetchone()["next_position"]
             connection.execute(
                 "INSERT INTO training_group_members(group_id, athlete_id, position) VALUES (?, ?, ?)",
                 (group["group_id"], athlete_id, group_position),
@@ -779,8 +946,23 @@ class Database:
             connection.execute("DELETE FROM sprint_capture_sessions WHERE id=?", (session_id,))
             return group["group_id"] if group else None
 
-    def add_attempt(self, session_id: int, athlete_id: int, elapsed_ms: int) -> int:
+    def add_attempt(
+        self, session_id: int, athlete_id: int, elapsed_ms: int, request_key: str | None = None,
+    ) -> int:
+        if request_key is not None and (not request_key.strip() or len(request_key) > 100):
+            raise ValueError("Invalid attempt request identifier.")
         with self.connect() as connection:
+            if request_key:
+                existing = connection.execute(
+                    "SELECT id,session_id,athlete_id,elapsed_ms FROM sprint_attempts WHERE request_key=?",
+                    (request_key,),
+                ).fetchone()
+                if existing:
+                    if (existing["session_id"], existing["athlete_id"], existing["elapsed_ms"]) != (
+                        session_id, athlete_id, elapsed_ms,
+                    ):
+                        raise ValueError("Attempt request identifier conflicts with another save.")
+                    return existing["id"]
             session = connection.execute(
                 "SELECT status FROM sprint_capture_sessions WHERE id=?", (session_id,)
             ).fetchone()
@@ -798,6 +980,22 @@ class Database:
                 (session_id, athlete_id),
             ).fetchone():
                 raise ValueError("Choose an athlete from this session roster.")
+            if request_key:
+                cursor = connection.execute(
+                    "INSERT INTO sprint_attempts(session_id,athlete_id,elapsed_ms,request_key) VALUES (?,?,?,?) ON CONFLICT(request_key) DO NOTHING",
+                    (session_id, athlete_id, elapsed_ms, request_key),
+                )
+                if cursor.rowcount:
+                    return cursor.lastrowid
+                existing = connection.execute(
+                    "SELECT id,session_id,athlete_id,elapsed_ms FROM sprint_attempts WHERE request_key=?",
+                    (request_key,),
+                ).fetchone()
+                if existing and (existing["session_id"], existing["athlete_id"], existing["elapsed_ms"]) == (
+                    session_id, athlete_id, elapsed_ms,
+                ):
+                    return existing["id"]
+                raise ValueError("Attempt request identifier conflicts with another save.")
             return connection.execute(
                 "INSERT INTO sprint_attempts(session_id, athlete_id, elapsed_ms) VALUES (?, ?, ?)",
                 (session_id, athlete_id, elapsed_ms),

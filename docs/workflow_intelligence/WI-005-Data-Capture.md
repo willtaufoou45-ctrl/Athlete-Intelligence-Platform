@@ -19,6 +19,11 @@ validated Summit Football `10 yd` sheet organizes athletes in rows and testing
 dates in columns. Without a safe import, coaches must re-enter those results or
 accept incomplete personal-best and trend context.
 
+Field capture also depends on delivery reliability. A phone-to-laptop local
+network connection failed during use and prevented a second sprint session from
+being recorded in AIP. Requiring the coach to run Terminal and keep a laptop
+reachable is an operational dependency that competes with coaching attention.
+
 ## Why It Matters
 
 Capturing a number is not sufficient if the coach cannot quickly understand
@@ -37,13 +42,21 @@ cells into normal persisted sprint attempts. Exact identity resolution,
 duplicate protection, source provenance, and atomic confirmation are required
 because incorrect history would undermine trust in every derived insight.
 
+Provide one permanent authenticated HTTPS address backed by hosted persistence
+so the phone does not depend on the coach's laptop or local network. Hosted mode
+still requires internet and must clearly distinguish a server-confirmed save
+from an unconfirmed network failure. Offline capture and later synchronization
+are separate future workflow intelligence and are not implied by hosted access.
+
 ## Related Product Decisions
 
 - [PD-004 — Separate Current Results from Historical Context](../product/PRODUCT_DECISIONS.md#pd-004--separate-current-results-from-historical-context)
 - [PD-006 — Historical imports require explicit identity resolution](../product/PRODUCT_DECISIONS.md#pd-006--historical-imports-require-explicit-identity-resolution)
+- [PD-008 — Hosted capture preserves the validated workflow and requires internet](../product/PRODUCT_DECISIONS.md#pd-008--hosted-capture-preserves-the-validated-workflow-and-requires-internet)
 
 ## Related Features
 
 - [FEAT-001 — Manual Sprint Capture](../product/FEATURES/feat-001-Manual%20Sprint%20Capture.md)
 - [FEAT-001 V2 — Historical Performance Context](../product/FEATURE_BACKLOG.md#historical-performance-context)
 - [FEAT-004 — Historical Sprint Import](../product/FEATURES/feat-004-Historical-Sprint-Import.md)
+- [FEAT-005 — Hosted Mobile Sprint Capture](../product/FEATURES/feat-005-Hosted-Mobile-Sprint-Capture.md)
