@@ -13,7 +13,7 @@ class PostgresCompatibilityTests(unittest.TestCase):
         self.assertIn("session_id BIGINT", schema)
         self.assertIn("DEFAULT (CURRENT_DATE::text)", schema)
         self.assertIn("request_key TEXT UNIQUE", schema)
-        self.assertEqual(POSTGRES_SCHEMA_VERSION, 2)
+        self.assertEqual(POSTGRES_SCHEMA_VERSION, 3)
 
     def test_query_converts_parameters_dates_collation_and_utc_timestamp(self):
         query = postgres_query(

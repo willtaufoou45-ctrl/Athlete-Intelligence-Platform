@@ -65,6 +65,36 @@ CREATE TABLE IF NOT EXISTS sprint_attempts (
     captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS sprint_session_intelligence (
+    session_id INTEGER PRIMARY KEY REFERENCES sprint_capture_sessions(id) ON DELETE CASCADE,
+    shared_emphasis TEXT NOT NULL DEFAULT '',
+    prep_work TEXT NOT NULL DEFAULT '',
+    conditioning_work TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS sprint_athlete_session_intelligence (
+    session_id INTEGER NOT NULL REFERENCES sprint_capture_sessions(id) ON DELETE CASCADE,
+    athlete_id INTEGER NOT NULL REFERENCES athletes(id) ON DELETE RESTRICT,
+    primary_intention TEXT NOT NULL DEFAULT '',
+    performance_target TEXT NOT NULL DEFAULT '',
+    athlete_feedback TEXT NOT NULL DEFAULT '',
+    coach_observation TEXT NOT NULL DEFAULT '',
+    interpretation TEXT NOT NULL DEFAULT '',
+    working_hypothesis TEXT NOT NULL DEFAULT '',
+    unknowns TEXT NOT NULL DEFAULT '',
+    carry_forward TEXT NOT NULL DEFAULT '',
+    reference_attempt_id INTEGER REFERENCES sprint_attempts(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (session_id, athlete_id)
+);
+CREATE TABLE IF NOT EXISTS sprint_attempt_intelligence (
+    attempt_id INTEGER PRIMARY KEY REFERENCES sprint_attempts(id) ON DELETE CASCADE,
+    effort_instruction TEXT NOT NULL DEFAULT '',
+    coach_observation TEXT NOT NULL DEFAULT '',
+    athlete_feedback TEXT NOT NULL DEFAULT '',
+    video_reference TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS training_groups (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL CHECK(length(trim(name)) > 0),
@@ -128,6 +158,8 @@ CREATE TABLE IF NOT EXISTS imported_results (
 );
 CREATE INDEX IF NOT EXISTS idx_attempt_session_athlete ON sprint_attempts(session_id, athlete_id);
 CREATE INDEX IF NOT EXISTS idx_attempt_athlete_history ON sprint_attempts(athlete_id, captured_at, id);
+CREATE INDEX IF NOT EXISTS idx_athlete_sprint_intelligence_history
+    ON sprint_athlete_session_intelligence(athlete_id, updated_at, session_id);
 CREATE INDEX IF NOT EXISTS idx_group_members_order ON training_group_members(group_id, position);
 CREATE INDEX IF NOT EXISTS idx_session_roster_order ON session_roster_members(session_id, position);
 CREATE INDEX IF NOT EXISTS idx_prototype_feedback_created ON prototype_feedback(created_at DESC, id DESC);
@@ -147,7 +179,7 @@ CREATE TABLE IF NOT EXISTS data_migrations (
 );
 """
 
-POSTGRES_SCHEMA_VERSION = 2
+POSTGRES_SCHEMA_VERSION = 3
 
 
 class Database:
@@ -850,6 +882,110 @@ class Database:
             row = connection.execute("SELECT * FROM sprint_capture_sessions WHERE id=?", (session_id,)).fetchone()
             return dict(row) if row else None
 
+    def update_session_intelligence(
+        self, session_id: int, shared_emphasis: str, prep_work: str, conditioning_work: str,
+    ) -> None:
+        values = validated_intelligence_texts(shared_emphasis, prep_work, conditioning_work)
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM sprint_capture_sessions WHERE id=?", (session_id,)).fetchone():
+                raise LookupError("Session not found.")
+            connection.execute(
+                """INSERT INTO sprint_session_intelligence(session_id,shared_emphasis,prep_work,conditioning_work)
+                   VALUES (?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+                   shared_emphasis=excluded.shared_emphasis,prep_work=excluded.prep_work,
+                   conditioning_work=excluded.conditioning_work,updated_at=CURRENT_TIMESTAMP""",
+                (session_id, *values),
+            )
+
+    def session_intelligence(self, session_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sprint_session_intelligence WHERE session_id=?", (session_id,)
+            ).fetchone()
+            return dict(row) if row else {
+                "session_id": session_id, "shared_emphasis": "", "prep_work": "", "conditioning_work": "",
+            }
+
+    def update_athlete_session_intelligence(self, session_id: int, athlete_id: int, **fields) -> None:
+        names = (
+            "primary_intention", "performance_target", "athlete_feedback", "coach_observation",
+            "interpretation", "working_hypothesis", "unknowns", "carry_forward",
+        )
+        values = validated_intelligence_texts(*(fields.get(name, "") for name in names))
+        reference_attempt_id = fields.get("reference_attempt_id")
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM sprint_capture_sessions WHERE id=?", (session_id,)).fetchone():
+                raise LookupError("Session not found.")
+            if not connection.execute("SELECT 1 FROM athletes WHERE id=?", (athlete_id,)).fetchone():
+                raise LookupError("Athlete not found.")
+            if reference_attempt_id is not None:
+                reference = connection.execute(
+                    "SELECT 1 FROM sprint_attempts WHERE id=? AND session_id=? AND athlete_id=?",
+                    (reference_attempt_id, session_id, athlete_id),
+                ).fetchone()
+                if not reference:
+                    raise ValueError("Reference repetition must belong to this athlete and session.")
+            placeholders = ",".join("?" for _ in names)
+            updates = ",".join(f"{name}=excluded.{name}" for name in names)
+            connection.execute(
+                f"""INSERT INTO sprint_athlete_session_intelligence(
+                    session_id,athlete_id,{','.join(names)},reference_attempt_id
+                ) VALUES (?,?,{placeholders},?) ON CONFLICT(session_id,athlete_id) DO UPDATE SET
+                    {updates},reference_attempt_id=excluded.reference_attempt_id,updated_at=CURRENT_TIMESTAMP""",
+                (session_id, athlete_id, *values, reference_attempt_id),
+            )
+
+    def athlete_session_intelligence(self, session_id: int, athlete_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT intelligence.*, attempts.elapsed_ms AS reference_elapsed_ms
+                   FROM sprint_athlete_session_intelligence intelligence
+                   LEFT JOIN sprint_attempts attempts ON attempts.id=intelligence.reference_attempt_id
+                   WHERE intelligence.session_id=? AND intelligence.athlete_id=?""",
+                (session_id, athlete_id),
+            ).fetchone()
+            if row:
+                return dict(row)
+            prior = connection.execute(
+                """SELECT intelligence.carry_forward, intelligence.primary_intention,
+                          sessions.session_date AS source_session_date
+                   FROM sprint_athlete_session_intelligence intelligence
+                   JOIN sprint_capture_sessions sessions ON sessions.id=intelligence.session_id
+                   WHERE intelligence.athlete_id=? AND intelligence.session_id<>?
+                     AND length(trim(intelligence.carry_forward))>0
+                   ORDER BY sessions.session_date DESC,intelligence.session_id DESC LIMIT 1""",
+                (athlete_id, session_id),
+            ).fetchone()
+            result = {name: "" for name in (
+                "primary_intention", "performance_target", "athlete_feedback", "coach_observation",
+                "interpretation", "working_hypothesis", "unknowns", "carry_forward",
+            )}
+            result.update({"session_id": session_id, "athlete_id": athlete_id,
+                           "reference_attempt_id": None, "reference_elapsed_ms": None,
+                           "prior_carry_forward": dict(prior) if prior else None})
+            return result
+
+    def update_attempt_intelligence(self, attempt_id: int, **fields) -> tuple[int, int]:
+        names = ("effort_instruction", "coach_observation", "athlete_feedback", "video_reference")
+        values = validated_intelligence_texts(*(fields.get(name, "") for name in names))
+        with self.connect() as connection:
+            attempt = connection.execute(
+                "SELECT session_id,athlete_id FROM sprint_attempts WHERE id=?", (attempt_id,)
+            ).fetchone()
+            if not attempt:
+                raise LookupError("Attempt not found.")
+            connection.execute(
+                """INSERT INTO sprint_attempt_intelligence(
+                    attempt_id,effort_instruction,coach_observation,athlete_feedback,video_reference
+                ) VALUES (?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
+                    effort_instruction=excluded.effort_instruction,
+                    coach_observation=excluded.coach_observation,
+                    athlete_feedback=excluded.athlete_feedback,
+                    video_reference=excluded.video_reference,updated_at=CURRENT_TIMESTAMP""",
+                (attempt_id, *values),
+            )
+            return attempt["session_id"], attempt["athlete_id"]
+
     def session_group(self, session_id: int) -> dict | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -1048,6 +1184,16 @@ class Database:
                        ORDER BY a.captured_at, a.id"""
             return [dict(row) for row in connection.execute(query)]
 
+    def attempt_intelligence_for_session_athlete(self, session_id: int, athlete_id: int) -> dict[int, dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT intelligence.* FROM sprint_attempt_intelligence intelligence
+                   JOIN sprint_attempts attempts ON attempts.id=intelligence.attempt_id
+                   WHERE attempts.session_id=? AND attempts.athlete_id=?""",
+                (session_id, athlete_id),
+            )
+            return {row["attempt_id"]: dict(row) for row in rows}
+
     def export_attempts(
         self,
         *,
@@ -1103,6 +1249,13 @@ def normalized_name(value: str, label: str) -> str:
     if not name or len(name) > 100:
         raise ValueError(f"{label} name must be between 1 and 100 characters.")
     return name
+
+
+def validated_intelligence_texts(*values: str | None) -> tuple[str, ...]:
+    cleaned = tuple((value or "").strip() for value in values)
+    if any(len(value) > 5000 for value in cleaned):
+        raise ValueError("Sprint Intelligence entries must be 5,000 characters or fewer.")
+    return cleaned
 
 
 def validated_choice(value: str | None, label: str, choices: set[str]) -> str | None:

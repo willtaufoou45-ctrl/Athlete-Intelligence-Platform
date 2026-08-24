@@ -113,6 +113,38 @@ class WebTests(unittest.TestCase):
         self.assertEqual(json.loads(response["body"])["attempts"], [])
         self.assertEqual(self.app.database.all_attempts(), [])
 
+    def test_sprint_intelligence_capture_and_review_appear_in_athlete_summary(self):
+        attempt_id = self.app.database.add_attempt(self.session_id, self.athlete_id, 1260)
+        rep = self.call("POST", f"/api/attempts/{attempt_id}/intelligence", {
+            "effort_instruction": "100%", "coach_observation": "Effortless and stayed low",
+            "athlete_feedback": "Low and shot out", "video_reference": "video://brody-rep-2",
+        })
+        self.assertEqual(rep["status"], "200 OK")
+        review = self.call(
+            "POST", f"/api/sessions/{self.session_id}/athletes/{self.athlete_id}/intelligence", {
+                "primary_intention": "Consistent reps under 1.30", "performance_target": "Under 1.30",
+                "athlete_feedback": "Low and shot out", "coach_observation": "Stable head and torso",
+                "interpretation": "Intent changed", "working_hypothesis": "Chasing time may add tension",
+                "unknowns": "Needs repetition", "carry_forward": "Run every sprint the same",
+                "reference_attempt_id": attempt_id,
+            },
+        )
+        data = self.body(review)
+        self.assertEqual(review["status"], "200 OK")
+        self.assertTrue(data["attempts"][0]["is_reference"])
+        self.assertEqual(data["attempts"][0]["effort_instruction"], "100%")
+        self.assertEqual(data["intelligence"]["carry_forward"], "Run every sprint the same")
+
+    def test_session_sprint_brief_is_saved_from_capture_page(self):
+        response = self.call("POST", f"/sessions/{self.session_id}/intelligence", {
+            "shared_emphasis": "Acceleration", "prep_work": "Wall drills and starts",
+            "conditioning_work": "Six resisted sprints after",
+        }, form=True)
+        self.assertEqual(response["status"], "303 See Other")
+        page = self.call("GET", f"/sessions/{self.session_id}")["body"].decode()
+        self.assertIn("Acceleration", page)
+        self.assertIn("Wall drills and starts", page)
+
     def test_edit_recalculates_session_best_and_pr_status(self):
         first_id = self.app.database.add_attempt(self.session_id, self.athlete_id, 1800)
         second_id = self.app.database.add_attempt(self.session_id, self.athlete_id, 1750)
@@ -131,7 +163,10 @@ class WebTests(unittest.TestCase):
         data = self.body(response)
         self.assertEqual(response["status"], "200 OK")
         self.assertEqual(data["best"], "1.8")
-        self.assertEqual(data["attempts"], [{"id": first_id, "time": "1.8", "status": "baseline", "just_saved": False}])
+        self.assertEqual(
+            {key: data["attempts"][0][key] for key in ("id", "time", "status", "just_saved")},
+            {"id": first_id, "time": "1.8", "status": "baseline", "just_saved": False},
+        )
 
     def test_capture_sessions_are_isolated_while_pr_history_is_shared(self):
         self.app.database.add_attempt(self.session_id, self.athlete_id, 1800)
@@ -406,7 +441,10 @@ class WebTests(unittest.TestCase):
 
         data = self.body(self.call("GET", f"/api/sessions/{current}/athletes/{athlete_id}"))
 
-        self.assertEqual(data["attempts"], [{"id": current_attempt, "time": "1.68", "status": "attempt", "just_saved": False}])
+        self.assertEqual(
+            {key: data["attempts"][0][key] for key in ("id", "time", "status", "just_saved")},
+            {"id": current_attempt, "time": "1.68", "status": "attempt", "just_saved": False},
+        )
         self.assertEqual(data["best"], "1.68")
         self.assertEqual(data["all_time_best"], {"time": "1.65", "date": "2026-07-20"})
         self.assertEqual(data["previous_session"], {"best": "1.7", "date": "2026-08-03"})

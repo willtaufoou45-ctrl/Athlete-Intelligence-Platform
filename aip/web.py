@@ -222,6 +222,14 @@ def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config
                 session_id = resource_id(parts[1], "session")
                 database.add_session_athlete(session_id, form_data(environ).get("name", ""))
                 return redirect(start_response, f"/sessions/{session_id}")
+            if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "intelligence":
+                session_id = resource_id(parts[1], "session")
+                data = form_data(environ)
+                database.update_session_intelligence(
+                    session_id, data.get("shared_emphasis", ""), data.get("prep_work", ""),
+                    data.get("conditioning_work", ""),
+                )
+                return redirect(start_response, f"/sessions/{session_id}")
             if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "complete":
                 session_id = resource_id(parts[1], "session")
                 database.complete_session(session_id)
@@ -247,6 +255,32 @@ def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config
                     data.get("request_id"),
                 )
                 return json_response(start_response, athlete_summary(database, session_id, athlete_id, attempt_id), "201 Created")
+            if method == "POST" and len(parts) == 6 and parts[0:2] == ["api", "sessions"] and parts[3] == "athletes" and parts[5] == "intelligence":
+                session_id = resource_id(parts[2], "session")
+                athlete_id = resource_id(parts[4], "athlete")
+                data = json_data(environ)
+                reference = data.get("reference_attempt_id")
+                database.update_athlete_session_intelligence(
+                    session_id, athlete_id,
+                    primary_intention=data.get("primary_intention", ""),
+                    performance_target=data.get("performance_target", ""),
+                    athlete_feedback=data.get("athlete_feedback", ""),
+                    coach_observation=data.get("coach_observation", ""),
+                    interpretation=data.get("interpretation", ""),
+                    working_hypothesis=data.get("working_hypothesis", ""),
+                    unknowns=data.get("unknowns", ""), carry_forward=data.get("carry_forward", ""),
+                    reference_attempt_id=resource_id(reference, "attempt") if reference not in (None, "") else None,
+                )
+                return json_response(start_response, athlete_summary(database, session_id, athlete_id))
+            if method == "POST" and len(parts) == 4 and parts[0:2] == ["api", "attempts"] and parts[3] == "intelligence":
+                attempt_id = resource_id(parts[2], "attempt")
+                data = json_data(environ)
+                session_id, athlete_id = database.update_attempt_intelligence(
+                    attempt_id, effort_instruction=data.get("effort_instruction", ""),
+                    coach_observation=data.get("coach_observation", ""),
+                    athlete_feedback=data.get("athlete_feedback", ""), video_reference=data.get("video_reference", ""),
+                )
+                return json_response(start_response, athlete_summary(database, session_id, athlete_id))
             if method == "POST" and len(parts) == 4 and parts[0:2] == ["api", "attempts"] and parts[3] == "edit":
                 attempt_id = resource_id(parts[2], "attempt")
                 session_id, athlete_id = database.update_attempt(attempt_id, seconds_to_milliseconds(json_data(environ).get("elapsed_seconds", "")))
@@ -618,6 +652,7 @@ def session_page(db: Database, session_id: int) -> str:
     empty = "" if athletes else "<p class='notice'>Add an athlete from the home page before recording an attempt.</p>"
     back_link = f"/groups/{group['id']}" if group else "/"
     completed = session["status"] == "completed"
+    sprint_intelligence = db.session_intelligence(session_id)
     disabled = "disabled" if completed or not athletes else ""
     status_notice = (
         "<p class='notice'>This session is complete. Results are preserved and capture is closed.</p>"
@@ -639,6 +674,15 @@ def session_page(db: Database, session_id: int) -> str:
     body = f"""
     <header class='capture-header'><a href='{back_link}'>← Sessions</a><p class='capture-context'>{html.escape(session_label(session, group['name'] if group else None))} · {'Completed session' if completed else 'Live'}</p><p class='muted'>{html.escape(session_conditions(session))}</p></header>
     <main class='capture-layout'>
+      <details class='card session-intelligence' {'open' if sprint_intelligence['shared_emphasis'] else ''}>
+        <summary>Sprint Brief</summary>
+        <form method='post' action='/sessions/{session_id}/intelligence' class='intelligence-form'>
+          <label>Shared emphasis<input name='shared_emphasis' maxlength='5000' value='{html.escape(sprint_intelligence['shared_emphasis'], quote=True)}' placeholder='Acceleration'></label>
+          <label>Work leading into timed sprints<textarea name='prep_work' maxlength='5000' rows='4' placeholder='Wall drills, switches, jumps, starts…'>{html.escape(sprint_intelligence['prep_work'])}</textarea></label>
+          <label>Conditioning after quality work<textarea name='conditioning_work' maxlength='5000' rows='2' placeholder='Six resisted sprints with short rest'>{html.escape(sprint_intelligence['conditioning_work'])}</textarea></label>
+          <button>Save Sprint Brief</button>
+        </form>
+      </details>
       <section class='capture-card'>
         {status_notice}{empty}<form id='capture-form' data-session='{session_id}' data-completed='{'true' if completed else 'false'}'>
           <div class='athlete-flow'><button type='button' id='previous-athlete' class='flow-button' aria-label='Previous athlete'>←</button><div class='active-athlete'><span id='athlete-position'>Athlete</span><strong id='athlete-name'>Choose athlete</strong></div><button type='button' id='next-athlete' class='flow-button' aria-label='Next athlete'>→</button></div>
@@ -701,11 +745,19 @@ def athlete_summary(db: Database, session_id: int, athlete_id: int, saved_attemp
     if comparable:
         fastest = min(comparable, key=lambda a: (a["elapsed_ms"], a["captured_at"], a["id"]))
         all_time_best = {"time": format_seconds(fastest["elapsed_ms"]), "date": fastest["session_date"]}
+    attempt_intelligence = db.attempt_intelligence_for_session_athlete(session_id, athlete_id)
+    athlete_intelligence = db.athlete_session_intelligence(session_id, athlete_id)
     attempts = []
     for attempt in reversed(session_attempts):
+        context = attempt_intelligence.get(attempt["id"], {})
         attempts.append({
             "id": attempt["id"], "time": format_seconds(attempt["elapsed_ms"]), "status": attempt["status"],
             "just_saved": attempt["id"] == saved_attempt_id,
+            "is_reference": attempt["id"] == athlete_intelligence.get("reference_attempt_id"),
+            "effort_instruction": context.get("effort_instruction", ""),
+            "coach_observation": context.get("coach_observation", ""),
+            "athlete_feedback": context.get("athlete_feedback", ""),
+            "video_reference": context.get("video_reference", ""),
         })
     return {
         "athlete_name": athlete["name"],
@@ -714,6 +766,7 @@ def athlete_summary(db: Database, session_id: int, athlete_id: int, saved_attemp
         "all_time_best": all_time_best,
         "previous_session": previous_session,
         "editable": session["status"] == "open",
+        "intelligence": athlete_intelligence,
     }
 
 
@@ -945,8 +998,11 @@ const escapeHtml=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>'
 function render(data){
   const allTime=data.all_time_best?`<strong>${escapeHtml(data.all_time_best.time)}s</strong><span>${escapeHtml(data.all_time_best.date)}</span>`:'<strong>—</strong><span>No comparable result</span>';
   const previous=data.previous_session?`<strong>${escapeHtml(data.previous_session.best)}s</strong><span>${escapeHtml(data.previous_session.date)}</span>`:'<strong>—</strong><span>No previous session</span>';
-  const rows=data.attempts.map(a=>`<li class="attempt ${a.just_saved?'saved':''}"><div><strong>${escapeHtml(a.time)}s</strong> ${a.status==='baseline'?'<span class="badge baseline">Baseline</span>':a.status==='pr'?'<span class="badge pr">PR</span>':''}</div>${data.editable?`<div class="actions"><button type="button" onclick="editAttempt(${a.id}, '${escapeHtml(a.time)}')">Edit</button><button type="button" class="danger" onclick="deleteAttempt(${a.id})">Delete</button></div>`:''}</li>`).join('');
-  results.innerHTML=`<div class="reference-grid"><div><p>All-time best</p>${allTime}</div><div><p>Previous session</p>${previous}</div></div><div class="current-results"><div class="result-heading"><p class="eyebrow">This session</p><div class="best"><span>Best</span><strong>${data.best?escapeHtml(data.best)+'s':'—'}</strong></div></div>${rows?`<ol class="attempts">${rows}</ol>`:'<p class="muted">No attempts yet.</p>'}</div>`;
+  const rows=data.attempts.map(a=>`<li class="attempt-block ${a.just_saved?'saved':''}"><div class="attempt"><div><strong>${escapeHtml(a.time)}s</strong> ${a.status==='baseline'?'<span class="badge baseline">Baseline</span>':a.status==='pr'?'<span class="badge pr">PR</span>':''} ${a.is_reference?'<span class="badge reference">Reference</span>':''}</div>${data.editable?`<div class="actions"><button type="button" onclick="editAttempt(${a.id}, '${escapeHtml(a.time)}')">Edit</button><button type="button" class="danger" onclick="deleteAttempt(${a.id})">Delete</button></div>`:''}</div><details class="rep-context"><summary>Rep context${a.effort_instruction||a.coach_observation||a.athlete_feedback||a.video_reference?' · saved':''}</summary><div class="intelligence-form"><label>Effort instruction<input id="effort-${a.id}" maxlength="5000" value="${escapeHtml(a.effort_instruction)}" placeholder="90–95% or 100%"></label><label>Coach observation<textarea id="observation-${a.id}" maxlength="5000" rows="2">${escapeHtml(a.coach_observation)}</textarea></label><label>Athlete feedback<textarea id="feedback-${a.id}" maxlength="5000" rows="2">${escapeHtml(a.athlete_feedback)}</textarea></label><label>Video reference<input id="video-${a.id}" maxlength="5000" value="${escapeHtml(a.video_reference)}" placeholder="Link or stored video ID"></label><button type="button" onclick="saveRepContext(${a.id})">Save rep context</button></div></details></li>`).join('');
+  const intel=data.intelligence||{};
+  const prior=intel.prior_carry_forward?`<div class="carry-forward"><p class="eyebrow">Returned from ${escapeHtml(intel.prior_carry_forward.source_session_date)}</p><p>${escapeHtml(intel.prior_carry_forward.carry_forward)}</p></div>`:'';
+  const references=data.attempts.map(a=>`<option value="${a.id}" ${a.is_reference?'selected':''}>${escapeHtml(a.time)}s</option>`).join('');
+  results.innerHTML=`${prior}<div class="reference-grid"><div><p>All-time best</p>${allTime}</div><div><p>Previous session</p>${previous}</div></div><div class="current-results"><div class="result-heading"><p class="eyebrow">This session</p><div class="best"><span>Best</span><strong>${data.best?escapeHtml(data.best)+'s':'—'}</strong></div></div>${rows?`<ol class="attempts">${rows}</ol>`:'<p class="muted">No attempts yet.</p>'}</div><details class="athlete-intelligence" ${intel.primary_intention||intel.carry_forward?'open':''}><summary>Coach review & next session</summary><div class="intelligence-form"><label>Primary intention<input id="primary-intention" maxlength="5000" value="${escapeHtml(intel.primary_intention||'')}"></label><label>Performance target<input id="performance-target" maxlength="5000" value="${escapeHtml(intel.performance_target||'')}"></label><label>Reference repetition<select id="reference-attempt"><option value="">None</option>${references}</select></label><label>Athlete feedback<textarea id="athlete-feedback" maxlength="5000" rows="2">${escapeHtml(intel.athlete_feedback||'')}</textarea></label><label>Coach observation<textarea id="coach-observation" maxlength="5000" rows="3">${escapeHtml(intel.coach_observation||'')}</textarea></label><label>Interpretation<textarea id="interpretation" maxlength="5000" rows="2">${escapeHtml(intel.interpretation||'')}</textarea></label><label>Working hypothesis<textarea id="working-hypothesis" maxlength="5000" rows="2">${escapeHtml(intel.working_hypothesis||'')}</textarea></label><label>Unknowns<textarea id="unknowns" maxlength="5000" rows="2">${escapeHtml(intel.unknowns||'')}</textarea></label><label>Next-session carry-forward<textarea id="carry-forward" maxlength="5000" rows="3">${escapeHtml(intel.carry_forward||'')}</textarea></label><button type="button" onclick="saveAthleteIntelligence()">Confirm & save</button></div></details>`;
 }
 async function request(url, body={}){const csrf=document.querySelector("meta[name='csrf-token']")?.content||'';const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not save.');return data;}
 async function loadAthlete(){if(!athlete.value){results.innerHTML='<p class="muted">Select an athlete to see their results.</p>';return;}const response=await fetch(`/api/sessions/${sessionId}/athletes/${athlete.value}`);const data=await response.json();if(response.ok)render(data);else feedback.textContent=data.error||'Could not load results.';}
@@ -962,6 +1018,8 @@ elapsed.addEventListener('input',()=>{clearTimeout(saveTimer);feedback.textConte
 form.addEventListener('submit',async event=>{event.preventDefault();await saveAttempt();});
 window.editAttempt=async(id,current)=>{const value=prompt('Correct time in seconds:',current);if(value===null)return;try{render(await request(`/api/attempts/${id}/edit`,{elapsed_seconds:value}));feedback.textContent='Attempt updated.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
 window.deleteAttempt=async id=>{if(!confirm('Delete this attempt?'))return;try{render(await request(`/api/attempts/${id}/delete`));feedback.textContent='Attempt deleted.';}catch(error){feedback.textContent=error.message;}elapsed.focus();};
+window.saveRepContext=async id=>{try{render(await request(`/api/attempts/${id}/intelligence`,{effort_instruction:document.querySelector(`#effort-${id}`).value,coach_observation:document.querySelector(`#observation-${id}`).value,athlete_feedback:document.querySelector(`#feedback-${id}`).value,video_reference:document.querySelector(`#video-${id}`).value}));feedback.textContent='Rep context saved.';}catch(error){feedback.textContent=error.message;}};
+window.saveAthleteIntelligence=async()=>{try{render(await request(`/api/sessions/${sessionId}/athletes/${athlete.value}/intelligence`,{primary_intention:document.querySelector('#primary-intention').value,performance_target:document.querySelector('#performance-target').value,reference_attempt_id:document.querySelector('#reference-attempt').value,athlete_feedback:document.querySelector('#athlete-feedback').value,coach_observation:document.querySelector('#coach-observation').value,interpretation:document.querySelector('#interpretation').value,working_hypothesis:document.querySelector('#working-hypothesis').value,unknowns:document.querySelector('#unknowns').value,carry_forward:document.querySelector('#carry-forward').value}));feedback.textContent='Sprint Intelligence saved for the next session.';}catch(error){feedback.textContent=error.message;}};
 document.addEventListener('keydown',event=>{if(!event.altKey)return;if(event.key==='ArrowRight'){event.preventDefault();setAthlete(activeIndex+1);}else if(event.key==='ArrowLeft'){event.preventDefault();setAthlete(activeIndex-1);}else if(event.key.toLowerCase()==='a'){event.preventDefault();athleteSearch.focus();}});
 const retained=Number(localStorage.getItem(`aip-session-${sessionId}-athlete`));const retainedIndex=athletes.findIndex(item=>item.id===retained);if(athletes.length)setAthlete(retainedIndex>=0?retainedIndex:0,finePointer);
 """
@@ -978,6 +1036,7 @@ if(window.matchMedia('(hover: hover) and (pointer: fine)').matches){
 STYLES = """
 :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#17211b;background:#f3f5ef;line-height:1.5}*{box-sizing:border-box}body{margin:0;padding:32px;max-width:1100px;margin-inline:auto}header{margin:20px 0 32px}h1,h2,p{margin-top:0}h1{font-size:clamp(2rem,6vw,4.4rem);line-height:1;letter-spacing:-.05em;max-width:780px}h2{letter-spacing:-.025em}.eyebrow{text-transform:uppercase;letter-spacing:.13em;font-weight:800;font-size:.75rem;color:#647267}.home-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card,.capture-card,.results-card{background:#fff;border:1px solid #dce2d8;border-radius:18px;padding:24px;box-shadow:0 10px 30px #17211b0a}.sessions{grid-column:1/-1}label{display:grid;gap:7px;font-weight:700}input,select,button{font:inherit;border-radius:10px;border:1px solid #b9c3b8;padding:12px}input:focus,select:focus,button:focus{outline:3px solid #ffc857;outline-offset:2px}button{background:#173c2c;color:#fff;border-color:#173c2c;font-weight:800;cursor:pointer}button:disabled{opacity:.5}.inline-form,.session-form,.time-row{display:flex;align-items:end;gap:10px}.inline-form label,.session-form label{flex:1}ul{padding-left:20px}.session-link{display:flex;justify-content:space-between;color:inherit;text-decoration:none;border-top:1px solid #e6eae3;padding:14px 0}.session-link span,.muted,.shortcut{color:#6d776e}.capture-header h1{margin-bottom:8px}.capture-layout{display:grid;grid-template-columns:minmax(300px,.8fr) minmax(360px,1.2fr);gap:18px}.capture-card form{display:grid;gap:22px}.time-row input{font-size:2rem;width:100%;font-variant-numeric:tabular-nums}.time-row button{min-width:100px}.shortcut{font-size:.85rem;margin-top:30px}kbd{border:1px solid #c7cec5;border-bottom-width:2px;border-radius:5px;background:#f5f6f3;padding:2px 6px}.result-heading,.attempt{display:flex;justify-content:space-between;align-items:center;gap:12px}.best{text-align:right}.best span{display:block;color:#6d776e;font-size:.8rem}.best strong{font-size:1.8rem}.attempts{list-style:none;padding:0;margin:22px 0 0}.attempt{border-top:1px solid #e6eae3;padding:14px 0}.attempt strong{font-size:1.25rem;font-variant-numeric:tabular-nums}.badge{font-size:.7rem;text-transform:uppercase;font-weight:900;letter-spacing:.08em;padding:4px 7px;border-radius:999px;margin-left:6px}.baseline{background:#e7e9f8;color:#333b7a}.pr{background:#d7f4df;color:#155d2d}.actions{display:flex;gap:7px}.actions button{padding:7px 10px;background:#fff;color:#173c2c}.actions .danger{color:#8c2c24;border-color:#d7aaa6}.saved{animation:flash 1.2s}@keyframes flash{from{background:#d7f4df}to{background:transparent}}#feedback{min-height:24px;color:#155d2d;font-weight:800;margin:12px 0 0}.notice{background:#fff3cf;padding:12px;border-radius:10px}@media(max-width:720px){body{padding:18px}.home-grid,.capture-layout{grid-template-columns:1fr}.sessions{grid-column:auto}.inline-form,.session-form{align-items:stretch;flex-direction:column}.session-link{align-items:flex-start;flex-direction:column}}
 .groups,.legacy{grid-column:1/-1}.legacy summary{font-weight:800;cursor:pointer}.roster{list-style:none;padding:0}.roster li{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #e6eae3}.position{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:#e8eee7;font-weight:800}.group-label{font-weight:800;color:#47725d}.capture-header{margin-bottom:12px}.capture-context{font-weight:800;margin:10px 0 0}.capture-layout{display:block;max-width:760px}.capture-card form{gap:14px}.athlete-flow{display:grid;grid-template-columns:52px 1fr 52px;gap:10px;align-items:stretch}.flow-button{font-size:1.5rem;padding:8px}.active-athlete{display:flex;min-height:72px;flex-direction:column;align-items:center;justify-content:center;border:1px solid #b9c3b8;border-radius:12px;background:#f7f8f5}.active-athlete span{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#6d776e}.active-athlete strong{font-size:1.35rem;text-align:center}.jump-label{font-size:.85rem}.reference-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.reference-grid>div{background:#f3f5ef;border-radius:12px;padding:12px}.reference-grid p{font-size:.75rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#647267;margin-bottom:2px}.reference-grid strong,.reference-grid span{display:block}.reference-grid strong{font-size:1.4rem}.reference-grid span{font-size:.75rem;color:#6d776e}.current-results{margin-top:18px}.current-results .result-heading{border-bottom:1px solid #e6eae3}.secondary-controls{border-top:1px solid #e6eae3;margin-top:16px;padding-top:14px}.secondary-controls summary{font-weight:800;cursor:pointer}.secondary-controls label{margin-top:12px}.session-management{max-width:760px;margin-top:18px}.session-management .session-actions{align-items:stretch}.session-management .session-actions>a,.session-management .session-actions form,.session-management .session-actions button{flex:1;text-align:center}@media(max-width:720px){.groups,.legacy{grid-column:auto}.capture-header{margin-top:8px}.capture-card{padding:14px}.time-row input{font-size:2.35rem;padding:10px}.up-next{padding:9px 12px}.up-next ol{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.up-next li{display:block;padding:2px 0;font-size:.78rem;overflow-wrap:anywhere}.up-next li span{display:grid;margin-bottom:3px}.attempts{display:flex;gap:8px;margin-top:6px;overflow-x:auto;padding-bottom:4px}.attempt{align-items:flex-start;flex:0 0 auto;min-width:112px;padding:8px}.attempt .actions{margin-top:6px}.shortcut{display:none}.session-management{padding:16px}}
+.session-intelligence{margin-bottom:18px}.session-intelligence>summary,.athlete-intelligence>summary,.rep-context>summary{font-weight:800;cursor:pointer}.intelligence-form{display:grid;gap:12px;margin-top:14px}.intelligence-form textarea{font:inherit;border:1px solid #b9c3b8;border-radius:10px;padding:12px;resize:vertical}.attempt-block{border-top:1px solid #e6eae3;padding:8px 0}.attempt-block .attempt{border:0}.rep-context{padding:0 8px 10px}.athlete-intelligence{border-top:2px solid #dce2d8;margin-top:20px;padding-top:16px}.carry-forward{background:#fff3cf;border-radius:12px;padding:12px;margin-top:18px}.carry-forward p:last-child{margin-bottom:0}.reference{background:#fff0bd;color:#684c00}@media(max-width:720px){.attempts{display:block;overflow:visible}.attempt-block{min-width:0}.session-intelligence{padding:16px}}
 .prototype-nav{display:flex;justify-content:flex-end}.button-link{display:inline-block;background:#173c2c;color:#fff;text-decoration:none;border-radius:10px;padding:10px 14px;font-weight:800}.feedback-layout{max-width:760px}.feedback-form{display:grid;gap:20px}.feedback-form textarea{font:inherit;resize:vertical;border-radius:10px;border:1px solid #b9c3b8;padding:12px}.feedback-form textarea:focus{outline:3px solid #ffc857;outline-offset:2px}.feedback-context{display:grid;grid-template-columns:1fr 1fr;gap:12px}.feedback-list{display:grid;gap:14px}.feedback-entry h3{margin-bottom:4px;font-size:1rem}.feedback-entry p{white-space:pre-wrap}@media(max-width:720px){.feedback-context{grid-template-columns:1fr}}
 .export-form{display:flex;align-items:end;gap:10px;margin-top:14px}.export-form label{flex:1}@media(max-width:720px){.export-form{align-items:stretch;flex-direction:column}}
 .completed-sessions{margin-top:20px;border-top:1px solid #e6eae3;padding-top:16px}.completed-sessions summary,.add-session-athlete summary{font-weight:800;cursor:pointer}.session-entry{display:grid;grid-template-columns:1fr auto;align-items:center;border-top:1px solid #e6eae3}.session-entry .session-link{border:0}.session-entry form{margin:0}.text-danger{background:transparent;color:#8c2c24;border-color:#d7aaa6;padding:7px 10px}.header-actions,.session-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.session-actions form{margin:0}.danger-button{background:#fff;color:#8c2c24;border-color:#d7aaa6}.up-next{background:#eef3ec;border-radius:12px;padding:12px 16px}.up-next p{margin-bottom:5px}.up-next ol{list-style:none;margin:0;padding:0}.up-next li{display:flex;gap:10px;align-items:center;padding:5px 0}.up-next li span{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#fff;font-size:.75rem}.autosave-note{font-size:.85rem;color:#6d776e;margin:-8px 0 0}.add-session-athlete{border-top:1px solid #e6eae3;margin-top:18px;padding-top:16px}.add-session-athlete form{margin-top:12px}.add-session-athlete p{margin:8px 0 0;font-size:.85rem}@media(max-width:720px){.session-entry{grid-template-columns:1fr}.session-entry form{padding-bottom:12px}.header-actions{align-items:stretch;flex-direction:column}.header-actions>a,.header-actions form,.header-actions button{width:100%;text-align:center}.session-management .session-actions{flex-direction:column}.session-management .session-actions>a,.session-management .session-actions form,.session-management .session-actions button{width:100%}}

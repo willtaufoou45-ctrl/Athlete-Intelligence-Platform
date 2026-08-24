@@ -24,6 +24,45 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(reopened.all_athletes()[0]["name"], "Jordan")
         self.assertEqual(reopened.all_attempts()[0]["elapsed_ms"], 1720)
 
+    def test_sprint_intelligence_preserves_session_rep_review_and_carry_forward(self):
+        attempt_id = self.db.add_attempt(self.session_id, self.athlete_id, 1260)
+        self.db.update_session_intelligence(
+            self.session_id, "Acceleration", "Wall drills and starts", "Six resisted sprints after",
+        )
+        self.db.update_attempt_intelligence(
+            attempt_id, effort_instruction="100%", coach_observation="Effortless and stayed low",
+            athlete_feedback="Low and shot out", video_reference="video://rep-2",
+        )
+        self.db.update_athlete_session_intelligence(
+            self.session_id, self.athlete_id, primary_intention="Consistent reps under 1.30",
+            performance_target="Under 1.30", athlete_feedback="Low and shot out",
+            coach_observation="Big arms; stable head, neck, and shoulders",
+            interpretation="Intent changed after the fast rep",
+            working_hypothesis="Chasing time may create tension", unknowns="Needs repeated sessions",
+            carry_forward="Run every sprint the same. Do not think about beating your time.",
+            reference_attempt_id=attempt_id,
+        )
+        self.assertEqual(self.db.session_intelligence(self.session_id)["shared_emphasis"], "Acceleration")
+        context = self.db.attempt_intelligence_for_session_athlete(self.session_id, self.athlete_id)
+        self.assertEqual(context[attempt_id]["athlete_feedback"], "Low and shot out")
+        review = self.db.athlete_session_intelligence(self.session_id, self.athlete_id)
+        self.assertEqual(review["reference_elapsed_ms"], 1260)
+
+        later = self.db.add_session("10", "yards")
+        brief = self.db.athlete_session_intelligence(later, self.athlete_id)
+        self.assertEqual(
+            brief["prior_carry_forward"]["carry_forward"],
+            "Run every sprint the same. Do not think about beating your time.",
+        )
+
+    def test_reference_rep_must_match_the_athlete_and_session(self):
+        other = self.db.add_athlete("Other")
+        other_attempt = self.db.add_attempt(self.session_id, other, 1300)
+        with self.assertRaisesRegex(ValueError, "belong"):
+            self.db.update_athlete_session_intelligence(
+                self.session_id, self.athlete_id, reference_attempt_id=other_attempt,
+            )
+
     def test_attempt_request_key_makes_an_identical_retry_idempotent(self):
         first = self.db.add_attempt(self.session_id, self.athlete_id, 1720, "phone-request-1")
         retry = self.db.add_attempt(self.session_id, self.athlete_id, 1720, "phone-request-1")
