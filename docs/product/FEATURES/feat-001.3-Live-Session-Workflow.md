@@ -20,12 +20,14 @@ sprint timing.
 
 ## Implemented Behavior
 
-### Add a late athlete
+### Add an athlete after the session starts
 
-- An athlete can be created from an active Training Group session.
-- The athlete is appended to the active session roster snapshot.
-- The athlete is also appended to the persistent Training Group roster for
-  future sessions.
+- An existing athlete can be selected and added without creating a duplicate
+  profile. Their existing sprint history and intelligence remain connected.
+- A genuinely new athlete can still be created through a separate, clearly
+  labeled action with a duplicate-profile warning.
+- Either path appends the athlete to the active session roster snapshot and,
+  when needed, the persistent Training Group roster for future sessions.
 - Earlier sessions are not changed.
 - Completed sessions cannot accept roster changes.
 

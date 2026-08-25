@@ -1046,6 +1046,49 @@ class Database:
             )
             return athlete_id
 
+    def add_existing_session_athlete(self, session_id: int, athlete_id: int) -> None:
+        """Add an existing athlete to an open group session and future group roster."""
+        with self.connect() as connection:
+            session = connection.execute(
+                "SELECT status FROM sprint_capture_sessions WHERE id=?", (session_id,)
+            ).fetchone()
+            if not session:
+                raise LookupError("Session not found.")
+            if session["status"] != "open":
+                raise ValueError("Completed sessions cannot accept athletes.")
+            group = connection.execute(
+                "SELECT group_id FROM training_group_sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if not group:
+                raise ValueError("Existing athletes can only be added to an active Training Group session.")
+            if not connection.execute("SELECT 1 FROM athletes WHERE id=?", (athlete_id,)).fetchone():
+                raise LookupError("Athlete not found.")
+            if connection.execute(
+                "SELECT 1 FROM session_roster_members WHERE session_id=? AND athlete_id=?",
+                (session_id, athlete_id),
+            ).fetchone():
+                raise ValueError("This athlete is already in the active session.")
+            if not connection.execute(
+                "SELECT 1 FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                (group["group_id"], athlete_id),
+            ).fetchone():
+                group_position = connection.execute(
+                    "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM training_group_members WHERE group_id=?",
+                    (group["group_id"],),
+                ).fetchone()["next_position"]
+                connection.execute(
+                    "INSERT INTO training_group_members(group_id, athlete_id, position) VALUES (?, ?, ?)",
+                    (group["group_id"], athlete_id, group_position),
+                )
+            session_position = connection.execute(
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM session_roster_members WHERE session_id=?",
+                (session_id,),
+            ).fetchone()["next_position"]
+            connection.execute(
+                "INSERT INTO session_roster_members(session_id, athlete_id, position) VALUES (?, ?, ?)",
+                (session_id, athlete_id, session_position),
+            )
+
     def complete_session(self, session_id: int) -> None:
         with self.connect() as connection:
             cursor = connection.execute(

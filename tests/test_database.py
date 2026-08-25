@@ -237,6 +237,36 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in self.db.session_athletes(active_session)], [original, late])
         self.assertEqual([a["id"] for a in self.db.group_roster(group_id)], [original, late])
 
+    def test_existing_athlete_can_join_active_session_without_new_profile(self):
+        source = self.db.add_group("Source")
+        target = self.db.add_group("Target")
+        existing = self.db.add_group_athlete(source, "Jordan Lee")
+        session_id = self.db.add_group_session(target, "10", "yards")
+        athlete_count = len(self.db.all_athletes())
+
+        self.db.add_existing_session_athlete(session_id, existing)
+
+        self.assertEqual([athlete["id"] for athlete in self.db.session_roster(session_id)], [existing])
+        self.assertEqual([athlete["id"] for athlete in self.db.group_roster(target)], [existing])
+        self.assertEqual(len(self.db.all_athletes()), athlete_count)
+        with self.assertRaisesRegex(ValueError, "already in"):
+            self.db.add_existing_session_athlete(session_id, existing)
+
+    def test_existing_group_member_can_join_active_snapshot(self):
+        group_id = self.db.add_group("Active Group")
+        existing = self.db.add_group_athlete(group_id, "Jordan Lee")
+        session_id = self.db.add_group_session(group_id, "10", "yards")
+        with self.db.connect() as connection:
+            connection.execute(
+                "DELETE FROM session_roster_members WHERE session_id=? AND athlete_id=?",
+                (session_id, existing),
+            )
+
+        self.db.add_existing_session_athlete(session_id, existing)
+
+        self.assertEqual([athlete["id"] for athlete in self.db.group_roster(group_id)], [existing])
+        self.assertEqual([athlete["id"] for athlete in self.db.session_roster(session_id)], [existing])
+
     def test_completed_session_closes_roster_and_attempt_mutation(self):
         group_id = self.db.add_group("Completed Group")
         athlete_id = self.db.add_group_athlete(group_id, "Runner")
@@ -250,6 +280,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(session["completed_at"])
         with self.assertRaisesRegex(ValueError, "Completed|completed"):
             self.db.add_session_athlete(session_id, "Late Runner")
+        with self.assertRaisesRegex(ValueError, "Completed|completed"):
+            self.db.add_existing_session_athlete(session_id, athlete_id)
         with self.assertRaisesRegex(ValueError, "completed"):
             self.db.add_attempt(session_id, athlete_id, 1650)
         with self.assertRaisesRegex(ValueError, "completed"):

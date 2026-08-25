@@ -345,7 +345,9 @@ class WebTests(unittest.TestCase):
 
         capture_page = self.call("GET", f"/sessions/{session_id}")
         self.assertIn(b"Original Runner", capture_page["body"])
-        self.assertNotIn(b"Later Runner", capture_page["body"])
+        roster_script = capture_page["body"].decode().split("<script>const athletes=", 1)[1].split(";", 1)[0]
+        self.assertIn("Original Runner", roster_script)
+        self.assertNotIn("Later Runner", roster_script)
         rejected = self.call(
             "POST",
             f"/api/sessions/{session_id}/attempts",
@@ -380,6 +382,26 @@ class WebTests(unittest.TestCase):
             [a["name"] for a in self.app.database.group_roster(group_id)],
             ["Original Runner", "Late Runner"],
         )
+
+    def test_active_session_can_add_existing_athlete_without_new_profile(self):
+        source = self.app.database.add_group("Source Group")
+        target = self.app.database.add_group("Target Group")
+        existing = self.app.database.add_group_athlete(source, "Jordan Lee")
+        session_id = self.app.database.add_group_session(target, "10", "yards")
+
+        page = self.call("GET", f"/sessions/{session_id}")["body"].decode()
+        self.assertIn("Add an existing athlete", page)
+        self.assertIn("Create a new profile", page)
+        self.assertIn("Jordan Lee", page)
+
+        response = self.call(
+            "POST", f"/sessions/{session_id}/athletes/existing", {"athlete_id": existing}, form=True,
+        )
+
+        self.assertEqual(response["status"], "303 See Other")
+        self.assertEqual([athlete["id"] for athlete in self.app.database.session_roster(session_id)], [existing])
+        self.assertEqual([athlete["id"] for athlete in self.app.database.group_roster(target)], [existing])
+        self.assertEqual(len([athlete for athlete in self.app.database.all_athletes() if athlete["name"] == "Jordan Lee"]), 1)
 
     def test_capture_page_shows_next_three_and_autosaves_without_save_button(self):
         group_id = self.app.database.add_group("Queue Group")
