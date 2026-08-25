@@ -438,11 +438,20 @@ class WebTests(unittest.TestCase):
         body = self.call("GET", f"/sessions/{session_id}")["body"].decode()
 
         self.assertLess(body.index("id='athlete-name'"), body.index("id='elapsed'"))
-        self.assertLess(body.index("id='elapsed'"), body.index("Next three"))
+        self.assertLess(body.index("id='elapsed'"), body.index("id='active-rep-context'"))
+        self.assertLess(body.index("id='active-rep-context'"), body.index("Next three"))
         self.assertLess(body.index("Next three"), body.index("id='results'"))
         self.assertLess(body.index("id='results'"), body.index("Export Session CSV"))
         self.assertLess(body.index("Export Session CSV"), body.index("Delete session"))
         self.assertNotIn("Send Feedback", body)
+
+    def test_rep_context_is_edited_below_time_and_coach_review_is_post_session(self):
+        body = self.call("GET", f"/sessions/{self.session_id}")["body"].decode()
+
+        self.assertIn("Rep context · ${escapeHtml(a.time)}s", body)
+        self.assertIn("showRepContext(${a.id})", body)
+        self.assertIn("Coach review & next session · post-session", body)
+        self.assertIn("completed&&(intel.primary_intention||intel.carry_forward)", body)
 
     def test_athlete_summary_separates_current_attempts_from_comparable_history(self):
         group_id = self.app.database.add_group("History Group")
