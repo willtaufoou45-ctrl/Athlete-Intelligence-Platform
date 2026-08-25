@@ -24,6 +24,37 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(reopened.all_athletes()[0]["name"], "Jordan")
         self.assertEqual(reopened.all_attempts()[0]["elapsed_ms"], 1720)
 
+    def test_merge_athletes_preserves_attempts_rosters_groups_and_intelligence(self):
+        group_id = self.db.add_group("Team")
+        retained = self.db.add_group_athlete(group_id, "Nathaniel Mauia")
+        duplicate = self.db.add_group_athlete(group_id, "Nathaniel nauia")
+        group_session = self.db.add_group_session(group_id, "10", "yards")
+        attempt_id = self.db.add_attempt(group_session, duplicate, 1670)
+        self.db.update_athlete_session_intelligence(
+            group_session, duplicate, coach_observation="Stayed low", reference_attempt_id=attempt_id,
+        )
+        self.db.update_athlete_session_intelligence(
+            group_session, retained, coach_observation="Stable head",
+        )
+
+        self.db.merge_athletes(duplicate, retained, "Nathaniel Nauia")
+
+        self.assertIsNone(self.db.athlete(duplicate))
+        self.assertEqual(self.db.athlete(retained)["name"], "Nathaniel Nauia")
+        self.assertEqual(self.db.all_attempts()[0]["athlete_id"], retained)
+        self.assertEqual([row["id"] for row in self.db.group_roster(group_id)], [retained])
+        self.assertEqual([row["id"] for row in self.db.session_roster(group_session)], [retained])
+        review = self.db.athlete_session_intelligence(group_session, retained)
+        self.assertIn("Stable head", review["coach_observation"])
+        self.assertIn("Stayed low", review["coach_observation"])
+        self.assertEqual(review["reference_attempt_id"], attempt_id)
+
+    def test_merge_athletes_rejects_same_or_missing_profile(self):
+        with self.assertRaisesRegex(ValueError, "different"):
+            self.db.merge_athletes(self.athlete_id, self.athlete_id)
+        with self.assertRaisesRegex(LookupError, "not found"):
+            self.db.merge_athletes(9999, self.athlete_id)
+
     def test_sprint_intelligence_preserves_session_rep_review_and_carry_forward(self):
         attempt_id = self.db.add_attempt(self.session_id, self.athlete_id, 1260)
         self.db.update_session_intelligence(

@@ -546,7 +546,8 @@ class Database:
     def athlete_directory(self) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT a.id, a.name, g.id AS group_id, g.name AS group_name
+                """SELECT a.id, a.name, a.created_at, g.id AS group_id, g.name AS group_name,
+                          (SELECT COUNT(*) FROM sprint_attempts attempt WHERE attempt.athlete_id=a.id) AS attempt_count
                    FROM athletes a
                    LEFT JOIN training_group_members m ON m.athlete_id=a.id
                    LEFT JOIN training_groups g ON g.id=m.group_id
@@ -554,7 +555,10 @@ class Database:
             )
             athletes: dict[int, dict] = {}
             for row in rows:
-                athlete = athletes.setdefault(row["id"], {"id": row["id"], "name": row["name"], "groups": []})
+                athlete = athletes.setdefault(row["id"], {
+                    "id": row["id"], "name": row["name"], "created_at": row["created_at"],
+                    "attempt_count": row["attempt_count"], "groups": [],
+                })
                 if row["group_id"] is not None:
                     athlete["groups"].append({"id": row["group_id"], "name": row["group_name"]})
             return list(athletes.values())
@@ -568,6 +572,99 @@ class Database:
         name = normalized_name(name, "Athlete")
         with self.connect() as connection:
             return connection.execute("INSERT INTO athletes(name) VALUES (?)", (name,)).lastrowid
+
+    def merge_athletes(self, source_id: int, target_id: int, target_name: str | None = None) -> dict:
+        """Merge a duplicate sprint profile into the retained profile without losing history."""
+        if source_id == target_id:
+            raise ValueError("Choose two different athlete profiles.")
+        with self.connect() as connection:
+            source = connection.execute("SELECT * FROM athletes WHERE id=?", (source_id,)).fetchone()
+            target = connection.execute("SELECT * FROM athletes WHERE id=?", (target_id,)).fetchone()
+            if not source or not target:
+                raise LookupError("Athlete profile not found.")
+
+            for row in connection.execute(
+                "SELECT * FROM sprint_athlete_session_intelligence WHERE athlete_id=?", (source_id,)
+            ).fetchall():
+                existing = connection.execute(
+                    "SELECT * FROM sprint_athlete_session_intelligence WHERE session_id=? AND athlete_id=?",
+                    (row["session_id"], target_id),
+                ).fetchone()
+                if existing:
+                    fields = (
+                        "primary_intention", "performance_target", "athlete_feedback", "coach_observation",
+                        "interpretation", "working_hypothesis", "unknowns", "carry_forward",
+                    )
+                    values = [self._merged_profile_text(existing[field], row[field]) for field in fields]
+                    reference = existing["reference_attempt_id"] or row["reference_attempt_id"]
+                    connection.execute(
+                        """UPDATE sprint_athlete_session_intelligence SET
+                           primary_intention=?,performance_target=?,athlete_feedback=?,coach_observation=?,
+                           interpretation=?,working_hypothesis=?,unknowns=?,carry_forward=?,
+                           reference_attempt_id=?,updated_at=CURRENT_TIMESTAMP
+                           WHERE session_id=? AND athlete_id=?""",
+                        (*values, reference, row["session_id"], target_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM sprint_athlete_session_intelligence WHERE session_id=? AND athlete_id=?",
+                        (row["session_id"], source_id),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE sprint_athlete_session_intelligence SET athlete_id=? WHERE session_id=? AND athlete_id=?",
+                        (target_id, row["session_id"], source_id),
+                    )
+
+            connection.execute("UPDATE sprint_attempts SET athlete_id=? WHERE athlete_id=?", (target_id, source_id))
+            self._merge_memberships(connection, "training_group_members", "group_id", source_id, target_id)
+            self._merge_memberships(connection, "session_roster_members", "session_id", source_id, target_id)
+            if target_name is not None:
+                connection.execute(
+                    "UPDATE athletes SET name=? WHERE id=?",
+                    (normalized_name(target_name, "Athlete"), target_id),
+                )
+            connection.execute("DELETE FROM athletes WHERE id=?", (source_id,))
+            retained = connection.execute("SELECT * FROM athletes WHERE id=?", (target_id,)).fetchone()
+            return {"source": dict(source), "target": dict(retained)}
+
+    @staticmethod
+    def _merged_profile_text(retained: str, duplicate: str) -> str:
+        if not retained or retained == duplicate:
+            return duplicate or retained
+        if not duplicate:
+            return retained
+        return f"{retained}\n\n[Merged profile]\n{duplicate}"
+
+    @staticmethod
+    def _merge_memberships(connection, table: str, owner_column: str, source_id: int, target_id: int) -> None:
+        owners = [row[owner_column] for row in connection.execute(
+            f"SELECT {owner_column} FROM {table} WHERE athlete_id=?", (source_id,)
+        )]
+        for owner_id in owners:
+            if connection.execute(
+                f"SELECT 1 FROM {table} WHERE {owner_column}=? AND athlete_id=?", (owner_id, target_id)
+            ).fetchone():
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {owner_column}=? AND athlete_id=?", (owner_id, source_id)
+                )
+            else:
+                connection.execute(
+                    f"UPDATE {table} SET athlete_id=? WHERE {owner_column}=? AND athlete_id=?",
+                    (target_id, owner_id, source_id),
+                )
+            rows = connection.execute(
+                f"SELECT athlete_id FROM {table} WHERE {owner_column}=? ORDER BY position", (owner_id,)
+            ).fetchall()
+            for position, row in enumerate(rows, 100001):
+                connection.execute(
+                    f"UPDATE {table} SET position=? WHERE {owner_column}=? AND athlete_id=?",
+                    (position, owner_id, row["athlete_id"]),
+                )
+            for position, row in enumerate(rows, 1):
+                connection.execute(
+                    f"UPDATE {table} SET position=? WHERE {owner_column}=? AND athlete_id=?",
+                    (position, owner_id, row["athlete_id"]),
+                )
 
     def all_groups(self) -> list[dict]:
         with self.connect() as connection:

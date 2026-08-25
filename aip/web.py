@@ -72,6 +72,19 @@ def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config
                     return respond(start_response, page("Request expired", "<h1>Request expired</h1><p>Reload the page and try again.</p>"), "403 Forbidden")
             if method == "GET" and path == "/":
                 return respond(start_response, home_page(database))
+            if method == "GET" and path == "/maintenance/confirmed-duplicates-2026-08-24":
+                return respond(start_response, confirmed_duplicate_cleanup_page(database))
+            if method == "POST" and path == "/maintenance/confirmed-duplicates-2026-08-24":
+                data = form_data(environ)
+                if data.get("confirmation") != "MERGE CONFIRMED PROFILES":
+                    raise ValueError("Type the full confirmation phrase before merging.")
+                plan = confirmed_duplicate_plan(database)
+                if any(item["status"] != "ready" for item in plan):
+                    raise ValueError("Cleanup stopped because the live profiles no longer match the reviewed plan.")
+                for item in plan:
+                    for source in item["sources"]:
+                        database.merge_athletes(source["id"], item["target"]["id"], item["correct_name"])
+                return redirect(start_response, "/maintenance/confirmed-duplicates-2026-08-24?complete=yes")
             if method == "GET" and len(parts) == 3 and parts[:2] == ["internal", "intelligence"]:
                 case_studies = {
                     "rigby": ("9", "Case Study 001"),
@@ -391,6 +404,64 @@ def home_page(db: Database) -> str:
       <details class='card legacy'><summary>Standalone capture tools</summary><p class='muted'>Existing FEAT-001 workflows remain available for sessions without a Training Group.</p><h3>Athletes</h3><form method='post' action='/athletes' class='inline-form'><label>Name<input name='name' maxlength='100' required placeholder='Athlete name'></label><button>Add athlete</button></form><ul>{athlete_items}</ul><h3>New standalone session</h3>{session_form('/sessions')} </details>
     </main>"""
     return page("Sprint capture", body)
+
+
+CONFIRMED_DUPLICATE_SPECS = (
+    ("Seth Leaman", ("Seth leaman", "Seth Leaman"), 1),
+    ("McCoy Robert’s", ("McCoy Robert’s",), 1),
+    ("Ty jacks", ("Ty jacks",), 1),
+    ("Jax Mansfield", ("Jax Mansfield", "Jax mansfield"), 1),
+    ("Alexander Povyshev", ("Alex poshev", "Alexander Povyshev"), 1),
+    ("Lexington featherstone", ("Lexington featherstone",), 1),
+    ("Ryker Fetzer", ("Ryker Fetzer", "Ryker fetzer"), 2),
+    ("Izaac Tukuafu", ("Isaac Tukuafu", "Izaac Tukuafu"), 1),
+    ("Easton cook", ("Easton cook",), 1),
+    ("Carson romrell", ("Carson Romwell", "Carson romrell"), 1),
+    ("Izaiah Wilbur", ("Izaiah Wilbur",), 1),
+    ("Nathaniel Nauia", ("Nathaniel nauia", "Nathaniel Mauia"), 1),
+)
+
+
+def confirmed_duplicate_plan(db: Database) -> list[dict]:
+    athletes = db.athlete_directory()
+    reviewed_group = "Summit Football - Sub varsity"
+    plan = []
+    for correct_name, variants, expected_sources in CONFIRMED_DUPLICATE_SPECS:
+        matches = [item for item in athletes if item["name"] in variants]
+        sources = [item for item in matches if {group["name"] for group in item["groups"]} == {reviewed_group}]
+        targets = [item for item in matches if item not in sources]
+        status = "ready" if len(sources) == expected_sources and len(targets) == 1 else "review"
+        plan.append({
+            "correct_name": correct_name, "sources": sources, "target": targets[0] if len(targets) == 1 else None,
+            "matches": matches, "status": status,
+        })
+    return plan
+
+
+def confirmed_duplicate_cleanup_page(db: Database) -> str:
+    def profile_text(item: dict | None) -> str:
+        if not item:
+            return "—"
+        groups = ", ".join(group["name"] for group in item["groups"]) or "No group"
+        return f"{html.escape(item['name'])} · ID {item['id']} · {item['attempt_count']} attempts · {html.escape(groups)} · {html.escape(item['created_at'])}"
+
+    plan = confirmed_duplicate_plan(db)
+    rows = "".join(
+        f"<tr><td>{html.escape(item['correct_name'])}</td>"
+        f"<td>{'<br>'.join(profile_text(source) for source in item['sources']) or '—'}</td>"
+        f"<td>{profile_text(item['target'])}</td><td>{item['status']}</td></tr>" for item in plan
+    )
+    ready = all(item["status"] == "ready" for item in plan)
+    action = "" if not ready else """
+      <form method='post' action='/maintenance/confirmed-duplicates-2026-08-24'>
+        <label>Confirmation phrase<input name='confirmation' required autocomplete='off' placeholder='MERGE CONFIRMED PROFILES'></label>
+        <button>Merge these confirmed profiles</button>
+      </form>"""
+    body = f"""
+    <header><a href='/'>← Sprint capture</a><p class='eyebrow'>Read-first maintenance</p><h1>Confirmed duplicate cleanup</h1>
+      <p>This fixed plan preserves attempts, session rosters, group memberships, and Sprint Intelligence. It cannot merge profiles outside the reviewed list.</p></header>
+    <main class='capture-layout'><section class='card'><table><thead><tr><th>Correct profile</th><th>Duplicate removed</th><th>Profile retained</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>{action}</section></main>"""
+    return page("Confirmed duplicate cleanup", body)
 
 
 def intelligence_page(db: Database, athlete_id: str, case_study: str) -> str:
