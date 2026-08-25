@@ -85,6 +85,19 @@ def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config
                     for source in item["sources"]:
                         database.merge_athletes(source["id"], item["target"]["id"], item["correct_name"])
                 return redirect(start_response, "/maintenance/confirmed-duplicates-2026-08-24?complete=yes")
+            if method == "GET" and path == "/maintenance/confirmed-older-duplicates":
+                return respond(start_response, confirmed_older_duplicate_cleanup_page(database))
+            if method == "POST" and path == "/maintenance/confirmed-older-duplicates":
+                data = form_data(environ)
+                if data.get("confirmation") != "MERGE CONFIRMED OLDER PROFILES":
+                    raise ValueError("Type the full confirmation phrase before merging.")
+                plan = confirmed_older_duplicate_plan(database)
+                if any(item["status"] != "ready" for item in plan):
+                    raise ValueError("Cleanup stopped because the live profiles no longer match the reviewed plan.")
+                for item in plan:
+                    for source in item["sources"]:
+                        database.merge_athletes(source["id"], item["target"]["id"], item["correct_name"])
+                return redirect(start_response, "/maintenance/confirmed-older-duplicates?complete=yes")
             if method == "GET" and len(parts) == 3 and parts[:2] == ["internal", "intelligence"]:
                 case_studies = {
                     "rigby": ("9", "Case Study 001"),
@@ -462,6 +475,57 @@ def confirmed_duplicate_cleanup_page(db: Database) -> str:
       <p>This fixed plan preserves attempts, session rosters, group memberships, and Sprint Intelligence. It cannot merge profiles outside the reviewed list.</p></header>
     <main class='capture-layout'><section class='card'><table><thead><tr><th>Correct profile</th><th>Duplicate removed</th><th>Profile retained</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>{action}</section></main>"""
     return page("Confirmed duplicate cleanup", body)
+
+
+CONFIRMED_OLDER_DUPLICATE_SPECS = (
+    ("Tyllman Reese", ("Tyllman Reese",)),
+    ("Sione Fonua", ("Sione Fonua", "Sione Fonua 1")),
+    ("Rigby Young", ("Rigby", "Rigby young")),
+    ("Connor Hoecherl", ("Connor", "Connor Hoecherl")),
+    ("Mason Hickox", ("Mason", "Mason Hickox")),
+    ("Seth Leaman", ("Seth", "Seth Leaman")),
+)
+
+
+def confirmed_older_duplicate_plan(db: Database) -> list[dict]:
+    athletes = db.athlete_directory()
+    plan = []
+    for correct_name, variants in CONFIRMED_OLDER_DUPLICATE_SPECS:
+        matches = [item for item in athletes if item["name"] in variants]
+        matches.sort(key=lambda item: (item["created_at"], item["id"]))
+        target = matches[0] if len(matches) == 2 else None
+        sources = matches[1:] if target else []
+        plan.append({
+            "correct_name": correct_name, "sources": sources, "target": target,
+            "matches": matches, "status": "ready" if len(matches) == 2 else "review",
+        })
+    return plan
+
+
+def confirmed_older_duplicate_cleanup_page(db: Database) -> str:
+    def profile_text(item: dict | None) -> str:
+        if not item:
+            return "—"
+        groups = ", ".join(group["name"] for group in item["groups"]) or "No group"
+        return f"{html.escape(item['name'])} · ID {item['id']} · {item['attempt_count']} attempts · {html.escape(groups)} · {html.escape(item['created_at'])}"
+
+    plan = confirmed_older_duplicate_plan(db)
+    rows = "".join(
+        f"<tr><td>{html.escape(item['correct_name'])}</td>"
+        f"<td>{'<br>'.join(profile_text(source) for source in item['sources']) or '—'}</td>"
+        f"<td>{profile_text(item['target'])}</td><td>{item['status']}</td></tr>" for item in plan
+    )
+    ready = all(item["status"] == "ready" for item in plan)
+    action = "" if not ready else """
+      <form method='post' action='/maintenance/confirmed-older-duplicates'>
+        <label>Confirmation phrase<input name='confirmation' required autocomplete='off' placeholder='MERGE CONFIRMED OLDER PROFILES'></label>
+        <button>Merge these confirmed older profiles</button>
+      </form>"""
+    body = f"""
+    <header><a href='/'>← Sprint capture</a><p class='eyebrow'>Read-first maintenance</p><h1>Confirmed older duplicate cleanup</h1>
+      <p>This fixed plan leaves Toa Toala, Tua Toala, and Sione Fonua 2 separate.</p></header>
+    <main class='capture-layout'><section class='card'><table><thead><tr><th>Correct profile</th><th>Duplicate removed</th><th>Oldest profile retained</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>{action}</section></main>"""
+    return page("Confirmed older duplicate cleanup", body)
 
 
 def intelligence_page(db: Database, athlete_id: str, case_study: str) -> str:
