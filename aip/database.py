@@ -627,6 +627,82 @@ class Database:
             retained = connection.execute("SELECT * FROM athletes WHERE id=?", (target_id,)).fetchone()
             return {"source": dict(source), "target": dict(retained)}
 
+    def restore_mistaken_cross_team_profiles(self) -> list[dict]:
+        """Reverse the two confirmed cross-team merges while preserving session ownership."""
+        specs = (
+            {
+                "existing_id": 73, "expected_name": "Seth Leaman", "existing_final_name": "Seth Leaman",
+                "restored_id": 150, "restored_name": "Seth", "restored_created_at": "2026-08-19 15:26:21",
+                "restored_group": "Park city Football",
+            },
+            {
+                "existing_id": 151, "expected_name": "Connor Hoecherl", "existing_final_name": "Connor",
+                "restored_id": 169, "restored_name": "Connor Hoecherl", "restored_created_at": "2026-08-24 20:31:15",
+                "restored_group": "Summit Football - Sub varsity",
+            },
+        )
+        restored = []
+        with self.connect() as connection:
+            for spec in specs:
+                existing = connection.execute(
+                    "SELECT * FROM athletes WHERE id=?", (spec["existing_id"],)
+                ).fetchone()
+                if not existing or existing["name"] != spec["expected_name"]:
+                    raise ValueError("Profile restoration stopped because the retained profile changed.")
+                if connection.execute(
+                    "SELECT 1 FROM athletes WHERE id=?", (spec["restored_id"],)
+                ).fetchone():
+                    raise ValueError("Profile restoration stopped because an original profile ID is already in use.")
+                group = connection.execute(
+                    "SELECT id FROM training_groups WHERE name=?", (spec["restored_group"],)
+                ).fetchone()
+                if not group:
+                    raise LookupError("Original Training Group not found.")
+                group_id = group["id"]
+                session_ids = [row["session_id"] for row in connection.execute(
+                    "SELECT session_id FROM training_group_sessions WHERE group_id=?", (group_id,)
+                )]
+                placeholders = ",".join("?" for _ in session_ids)
+
+                connection.execute(
+                    "INSERT INTO athletes(id,name,created_at) VALUES (?,?,?)",
+                    (spec["restored_id"], spec["restored_name"], spec["restored_created_at"]),
+                )
+                connection.execute(
+                    "UPDATE athletes SET name=? WHERE id=?",
+                    (spec["existing_final_name"], spec["existing_id"]),
+                )
+                membership = connection.execute(
+                    "SELECT position FROM training_group_members WHERE group_id=? AND athlete_id=?",
+                    (group_id, spec["existing_id"]),
+                ).fetchone()
+                if not membership:
+                    raise ValueError("Profile restoration stopped because the original group membership is missing.")
+                connection.execute(
+                    "UPDATE training_group_members SET athlete_id=? WHERE group_id=? AND athlete_id=?",
+                    (spec["restored_id"], group_id, spec["existing_id"]),
+                )
+                if session_ids:
+                    parameters = (spec["restored_id"], spec["existing_id"], *session_ids)
+                    connection.execute(
+                        f"UPDATE sprint_attempts SET athlete_id=? WHERE athlete_id=? AND session_id IN ({placeholders})",
+                        parameters,
+                    )
+                    connection.execute(
+                        f"UPDATE sprint_athlete_session_intelligence SET athlete_id=? WHERE athlete_id=? AND session_id IN ({placeholders})",
+                        parameters,
+                    )
+                    connection.execute(
+                        f"UPDATE session_roster_members SET athlete_id=? WHERE athlete_id=? AND session_id IN ({placeholders})",
+                        parameters,
+                    )
+                restored.append({
+                    "restored_id": spec["restored_id"], "restored_name": spec["restored_name"],
+                    "retained_id": spec["existing_id"], "retained_name": spec["existing_final_name"],
+                    "group": spec["restored_group"],
+                })
+        return restored
+
     @staticmethod
     def _merged_profile_text(retained: str, duplicate: str) -> str:
         if not retained or retained == duplicate:

@@ -98,6 +98,13 @@ def create_app(database_path: str | Path = "data/aip.sqlite3", *, config: Config
                     for source in item["sources"]:
                         database.merge_athletes(source["id"], item["target"]["id"], item["correct_name"])
                 return redirect(start_response, "/maintenance/confirmed-older-duplicates?complete=yes")
+            if method == "GET" and path == "/maintenance/restore-cross-team-profiles":
+                return respond(start_response, restore_cross_team_profiles_page(database))
+            if method == "POST" and path == "/maintenance/restore-cross-team-profiles":
+                if form_data(environ).get("confirmation") != "RESTORE FOUR TEAM PROFILES":
+                    raise ValueError("Type the full confirmation phrase before restoring profiles.")
+                database.restore_mistaken_cross_team_profiles()
+                return redirect(start_response, "/")
             if method == "GET" and len(parts) == 3 and parts[:2] == ["internal", "intelligence"]:
                 case_studies = {
                     "rigby": ("9", "Case Study 001"),
@@ -526,6 +533,31 @@ def confirmed_older_duplicate_cleanup_page(db: Database) -> str:
       <p>This fixed plan leaves Toa Toala, Tua Toala, and Sione Fonua 2 separate.</p></header>
     <main class='capture-layout'><section class='card'><table><thead><tr><th>Correct profile</th><th>Duplicate removed</th><th>Oldest profile retained</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>{action}</section></main>"""
     return page("Confirmed older duplicate cleanup", body)
+
+
+def restore_cross_team_profiles_page(db: Database) -> str:
+    profiles = {item["id"]: item for item in db.athlete_directory()}
+    expected = ((73, "Seth Leaman", 150, "Seth", "Park city Football"),
+                (151, "Connor", 169, "Connor Hoecherl", "Summit Football - Sub varsity"))
+    ready = all(
+        retained_id in profiles and restored_id not in profiles
+        for retained_id, _, restored_id, _, _ in expected
+    )
+    rows = "".join(
+        f"<tr><td>{html.escape(retained_name)}</td><td>{html.escape(restored_name)}</td>"
+        f"<td>{html.escape(group_name)}</td><td>{'ready' if retained_id in profiles and restored_id not in profiles else 'review'}</td></tr>"
+        for retained_id, retained_name, restored_id, restored_name, group_name in expected
+    )
+    action = "" if not ready else """
+      <form method='post' action='/maintenance/restore-cross-team-profiles'>
+        <label>Confirmation phrase<input name='confirmation' required autocomplete='off' placeholder='RESTORE FOUR TEAM PROFILES'></label>
+        <button>Restore the four separate profiles</button>
+      </form>"""
+    body = f"""
+    <header><a href='/'>← Sprint capture</a><p class='eyebrow'>Read-first maintenance</p><h1>Restore separate team profiles</h1>
+      <p>Attempts and session membership return according to their original Training Group. No sprint history is deleted.</p></header>
+    <main class='capture-layout'><section class='card'><table><thead><tr><th>Profile retained</th><th>Profile restored</th><th>History returned from</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>{action}</section></main>"""
+    return page("Restore separate team profiles", body)
 
 
 def intelligence_page(db: Database, athlete_id: str, case_study: str) -> str:

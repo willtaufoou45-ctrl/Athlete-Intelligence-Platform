@@ -55,6 +55,41 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(LookupError, "not found"):
             self.db.merge_athletes(9999, self.athlete_id)
 
+    def test_restore_mistaken_cross_team_profiles_splits_history_by_group(self):
+        summit = self.db.add_group("Summit Football - Sub varsity")
+        park_city = self.db.add_group("Park city Football")
+        with self.db.connect() as connection:
+            connection.execute("INSERT INTO athletes(id,name) VALUES (?,?)", (73, "Seth Leaman"))
+            connection.execute("INSERT INTO athletes(id,name) VALUES (?,?)", (150, "Seth"))
+            connection.execute("INSERT INTO athletes(id,name) VALUES (?,?)", (151, "Connor"))
+            connection.execute("INSERT INTO athletes(id,name) VALUES (?,?)", (169, "Connor Hoecherl"))
+        self.db.add_existing_group_athlete(summit, 73)
+        self.db.add_existing_group_athlete(park_city, 150)
+        self.db.add_existing_group_athlete(park_city, 151)
+        self.db.add_existing_group_athlete(summit, 169)
+        summit_session = self.db.add_group_session(summit, "10", "yards")
+        park_session = self.db.add_group_session(park_city, "10", "yards")
+        seth_summit_attempt = self.db.add_attempt(summit_session, 73, 1700)
+        seth_park_attempt = self.db.add_attempt(park_session, 150, 1710)
+        connor_park_attempt = self.db.add_attempt(park_session, 151, 1720)
+        connor_summit_attempt = self.db.add_attempt(summit_session, 169, 1730)
+        self.db.merge_athletes(150, 73, "Seth Leaman")
+        self.db.merge_athletes(169, 151, "Connor Hoecherl")
+
+        self.db.restore_mistaken_cross_team_profiles()
+
+        self.assertEqual(self.db.athlete(73)["name"], "Seth Leaman")
+        self.assertEqual(self.db.athlete(150)["name"], "Seth")
+        self.assertEqual(self.db.athlete(151)["name"], "Connor")
+        self.assertEqual(self.db.athlete(169)["name"], "Connor Hoecherl")
+        attempts = {item["id"]: item["athlete_id"] for item in self.db.all_attempts()}
+        self.assertEqual(attempts[seth_summit_attempt], 73)
+        self.assertEqual(attempts[seth_park_attempt], 150)
+        self.assertEqual(attempts[connor_park_attempt], 151)
+        self.assertEqual(attempts[connor_summit_attempt], 169)
+        self.assertIn(150, [item["id"] for item in self.db.group_roster(park_city)])
+        self.assertIn(169, [item["id"] for item in self.db.group_roster(summit)])
+
     def test_sprint_intelligence_preserves_session_rep_review_and_carry_forward(self):
         attempt_id = self.db.add_attempt(self.session_id, self.athlete_id, 1260)
         self.db.update_session_intelligence(
